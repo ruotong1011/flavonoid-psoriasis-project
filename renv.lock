@@ -1,0 +1,13 @@
+{
+  "R": {
+    "Version": "4.3.0"
+  },
+  "Packages": {
+    "renv": {
+      "Package": "renv",
+      "Version": "1.0.0",
+      "Source": "Repository",
+      "Repository": "CRAN"
+    }
+  }
+}

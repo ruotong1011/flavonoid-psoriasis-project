@@ -1,0 +1,22 @@
+# data
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# targets and renv local state
+_targets/
+.renv/
+renv/library/
+renv/staging/
+
+# R session files
+.Rhistory
+.RData
+.Ruserdata
+
+# outputs can be regenerated
+results/tables/*
+results/figures/*
+!results/tables/.gitkeep
+!results/figures/.gitkeep

@@ -1,0 +1,4222 @@
+---
+title: "flavonoid project"
+output: html_notebook
+---
+
+# set up pathway and library packages
+```{r}
+setwd("C:/Users/14999/OneDrive - King's College London/genetics/")
+getwd()
+
+
+# Load necessary libraries
+library(psych)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(survival)
+library(tableone)
+library(knitr)
+library(ggplot2)
+library(lubridate)
+library(ggsurvfit)
+library(forestmodel)
+library(lubridate)
+library(mediation)
+```
+
+
+# load needed dataset and select participants 
+```{r}
+# Load and filter psoriasis demographic data
+participants.recall.over1 <- read.csv("24hr/participants.recall.over1.csv")
+demographics <- read.csv("basic files/demographics.csv")
+filtered.incidence <- read.csv("basic files/4907incidence.csv")
+p.demographics <- demographics %>%
+  filter(Participant.ID %in% filtered.incidence$Participant.ID) %>%
+  mutate(group = "psoriasis") # Filter participants based on incidence data
+
+# Load and filter non-psoriasis demographic data
+demographics <- read.csv("basic files/demographics.csv")
+filtered.control <- read.csv("basic files/484895control.csv")
+n.demographics <- demographics %>%
+  filter(Participant.ID %in% filtered.control$Participant.ID) %>%
+  mutate(group = "non-psoriasis") # Filter participants based on control data
+
+# Combine psoriasis and non-psoriasis demographic data
+demographics <- rbind(p.demographics, n.demographics) %>%
+  filter(Participant.ID %in% participants.recall.over1$Participant.ID)
+demographics <- demographics[order(demographics$Participant.ID), ]
+
+# Load non-psoriasis 24-hour recall data
+p.24h.foods.average <- read.csv("24hr/average 24hrecall individual foods.csv") %>% 
+  filter(Participant.ID %in% demographics$Participant.ID)
+p.24h.foods.average[, 1:201][is.na(p.24h.foods.average[, 1:201])] <- 0
+
+p.24h.foods.average <- p.24h.foods.average[, c(2:201, 1)]
+
+p.24h.foods.average <- cbind(
+  p.24h.foods.average[, 1:139], 
+  Vegetarian.alternatives.intake = 0, 
+  p.24h.foods.average[, 140:ncol(p.24h.foods.average)]
+)
+
+# Display the updated column names to confirm the change
+names(p.24h.foods.average)
+
+participants.recall.over2 <- read.csv("24hr/participants.recall.over2.csv")
+
+# load polyphenol and flavonoid checkout dataset
+flavonoid.checkout <- read.csv("C:/Users/14999/OneDrive - King's College London/Documents/flavonoid UKbiobank.csv")
+new.row <- as.data.frame(matrix(0, ncol = ncol(flavonoid.checkout)))
+colnames(new.row) <- colnames(flavonoid.checkout)
+flavonoid.checkout <- rbind(new.row, flavonoid.checkout)
+# Convert columns 9 to 223 in flavonoid.checkout to numeric
+flavonoid.checkout[881, 95] <- 0
+flavonoid.checkout[, 9:223] <- lapply(flavonoid.checkout[, 9:223], function(x) as.numeric(as.character(x)))
+
+```
+
+All data is based on the dataset which merges Phenol Explorer and USDA database (Ana's group, Yifan work).
+
+
+# contribution
+```{r}
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(tibble)
+library(stringr)
+
+# --- 1) 定义五大类所含原始列名（按你的命名；不存在的列会被自动忽略） ---
+cols <- list(
+  anthocyanins = c("Cyanidin","Delphinidin","Malvidin","Pelargonidin","Petunidin","Peonidin"),
+  flavanones   = c("Eriodictyol","Hesperetin","Naringenin"),
+  flavonols    = c("Quercetin","Kaempferol","Myricetin","Isorhamnetin",
+                   "Jaceidin","Patuletin","Spinacetin"),  # 你备注里想纳入的三个
+  flavones     = c("Luteolin","Apigenin"),
+  flavan3ols   = c("X....Catechin","X....Epicatechin","X....Epigallocatechin","X....Gallocatechin",
+                   "X....Catechin.3.O.gallate","X....Epicatechin.3.O.gallate",
+                   "X....Epigallocatechin.3.O.gallate","X....Gallocatechin.3.O.gallate",
+                   "Theaflavin","Thearubigins","X02.mers","X03.mers","X04.06.mers",
+                   "X07.10.mers","Polymers...10.mers.")
+)
+
+# --- 2) 工具：把单体列 -> 汇总成“每行食物 × 五大类”的 mg/100g 矩阵 ---
+#     输入：flavonoid.checkout（行为食物，列为单体/聚合物）
+#     输出：flavonoid_subclass_per100g（行为食物，列：5 大类）
+build_subclass_matrix <- function(df, cols_map) {
+  out <- lapply(cols_map, function(cand_cols) {
+    keep <- intersect(cand_cols, colnames(df))
+    if (length(keep) == 0) {
+      rep(0, nrow(df))
+    } else {
+      rowSums(df[, keep, drop = FALSE], na.rm = TRUE)
+    }
+  })
+  out <- as.data.frame(out, check.names = FALSE)
+  rownames(out) <- rownames(df)
+  out
+}
+
+
+row_map <- tribble(
+  ~row, ~food, ~components,
+  14L, "Black tea", list(list(col="Standard.tea.intake", portion=240, weight=1)),
+  15L, "Green tea", list(list(col="Green.tea.intake", portion=240, weight=1)),
+  16L, "Other tea A", list(list(col="Other.tea.intake", portion=240, weight=0.5)),
+  17L, "Other tea B", list(list(col="Other.tea.intake", portion=240, weight=0.5)),
+
+  32L, "Dark chocolate", list(list(col="Dark.chocolate.intake", portion=50, weight=1)),
+  33L, "Milk chocolate", list(list(col="Milk.chocolate.intake", portion=50, weight=1)),
+  40L, "Hot chocolate (all)", list(list(col="Hot.chocolate.intake", portion=240, weight=1),
+                                   list(col="Low.calorie.hot.chocolate.intake", portion=240, weight=1)),
+  50L, "Chocolate biscuits", list(list(col="Chocolate.biscuits.intake", portion=13.5, weight=1)),
+  51L, "Mixed chocolate snacks", list(
+        list(col="Chocolate.covered.biscuits.intake", portion=13.5, weight=1),
+        list(col="Chocolate.covered.raisin.intake",   portion=30,   weight=1),
+        list(col="Chocolate.bar.intake",              portion=50,   weight=1),
+        list(col="Chocolate.sweet.intake",            portion=30,   weight=1)
+  ),
+
+  58L, "Red wine",        list(list(col="Red.wine.intake",        portion=165.76, weight=1)),
+  59L, "Rose wine",       list(list(col="Rose.wine.intake",       portion=163.5,  weight=1)),
+  60L, "White wine",      list(list(col="White.wine.intake",      portion=162.96, weight=1)),
+  61L, "Fortified wine",  list(list(col="Fortified.wine.intake",  portion=50,     weight=1)),
+
+  85L, "Orange juice",           list(list(col="Orange.juice.intake",          portion=250, weight=1)),
+  78L, "Grapefruit juice",       list(list(col="Grapefruit.juice.intake",      portion=250, weight=1)),
+  90L, "Pure fruit/veg juice",   list(list(col="Pure.fruit.vegetable.juice.intake", portion=250, weight=1)),
+  89L, "Fruit smoothie",         list(list(col="Fruit.smoothie.intake",        portion=250, weight=1)),
+
+  348L, "Stewed fruit (apples)", list(list(col="Stewed.fruit.intake", portion=80, weight=1)),
+  298L, "Prunes",                list(list(col="Prune.intake",        portion=30, weight=1)),
+  366L, "Dried fruit",           list(list(col="Dried.fruit.intake",  portion=30, weight=1)),
+  304L, "Mixed fruit",           list(list(col="Mixed.fruit.intake",  portion=80, weight=1)),
+  252L, "Apples",                list(list(col="Apple.intake",        portion=80, weight=1)),
+  300L, "Bananas",               list(list(col="Banana.intake",       portion=80, weight=1)),
+  354L, "Berries",               list(list(col="Berry.intake",        portion=80, weight=1)),
+  346L, "Cherries",              list(list(col="Cherry.intake",       portion=80, weight=1)),
+  369L, "Grapefruit",            list(list(col="Grapefruit.intake",   portion=80, weight=1)),
+
+  # 葡萄：同一 intake 拆分黑/绿
+  377L, "Grapes - black", list(list(col="Grape.intake", portion=80, weight=0.32)),
+  378L, "Grapes - green", list(list(col="Grape.intake", portion=80, weight=0.68)),
+
+  307L, "Mango",      list(list(col="Mango.intake",      portion=80, weight=1)),
+  311L, "Melon",      list(list(col="Melon.intake",      portion=80, weight=1)),
+  372L, "Orange",     list(list(col="Orange.intake",     portion=80, weight=1)),
+  373L, "Tangerine",  list(list(col="Satsuma.intake",    portion=80, weight=1)),
+  340L, "Peach/Nectarine", list(list(col="Peach.nectarine.intake", portion=80, weight=1)),
+  255L, "Pear",       list(list(col="Pear.intake",       portion=80, weight=1)),
+  319L, "Pineapple",  list(list(col="Pineapple.intake",  portion=80, weight=1)),
+  344L, "Plum",       list(list(col="Plum.intake",       portion=40, weight=1)),
+  321L, "Other fruit - pomegranate", list(list(col="Other.fruit.intake", portion=80, weight=0.5)),
+  305L, "Other fruit - kiwi",        list(list(col="Other.fruit.intake", portion=80, weight=0.5)),
+
+  578L, "Fried potatoes",          list(list(col="Fried.potatoes.intake",          portion=180, weight=1)),
+  572L, "Boiled/Baked potatoes",   list(list(col="Boiled.baked.potatoes.intake",   portion=180, weight=1)),
+  576L, "Mashed potatoes",         list(list(col="Mashed.potato.intake",           portion=180, weight=1)),
+
+  614L, "Mixed vegetables",  list(list(col="Mixed.vegetable.intake", portion=80, weight=1)),
+  615L, "Vegetable pieces",  list(list(col="Vegetable.pieces.intake", portion=80, weight=1)),
+  623L, "Coleslaw",          list(list(col="Coleslaw.intake",         portion=80, weight=1)),
+  667L, "Side salad",        list(list(col="Side.salad.intake",       portion=80, weight=1)),
+  379L, "Avocado",           list(list(col="Avocado.intake",          portion=160, weight=1)),
+  610L, "Green beans",       list(list(col="Green.bean.intake",       portion=80, weight=0.93)),
+  587L, "Beetroot",          list(list(col="Beetroot.intake",         portion=80, weight=1)),
+  505L, "Broccoli",          list(list(col="Broccoli.intake",         portion=80, weight=1)),
+  565L, "Butternut squash",  list(list(col="Butternut.squash.intake", portion=80, weight=1)),
+  503L, "Cabbage",           list(list(col="Cabbage.kale.intake",     portion=80, weight=0.5)),
+  500L, "Kale",              list(list(col="Cabbage.kale.intake",     portion=80, weight=0.5)),
+  592L, "Carrots",           list(list(col="Carrot.intake",           portion=80, weight=1)),
+  499L, "Cauliflower",       list(list(col="Cauliflower.intake",      portion=80, weight=1)),
+  465L, "Celery",            list(list(col="Celery.intake",           portion=26.7, weight=1)),
+  559L, "Courgette",         list(list(col="Courgette.intake",        portion=80, weight=1)),
+  467L, "Cucumber",          list(list(col="Cucumber.intake",         portion=32, weight=1)),
+  419L, "Garlic",            list(list(col="Garlic.intake",           portion=5,  weight=1)),
+  522L, "Leek",              list(list(col="Leek.intake",             portion=80, weight=1)),
+  702L, "Lettuce",           list(list(col="Lettuce.intake",          portion=80, weight=1)),
+  712L, "Mushroom",          list(list(col="Mushroom.intake",         portion=80, weight=1)),
+  521L, "Onion",             list(list(col="Onion.intake",            portion=80, weight=1)),
+  586L, "Parsnip",           list(list(col="Parsnip.intake",          portion=80, weight=1)),
+  397L, "Sweet pepper",      list(list(col="Sweet.pepper.intake",     portion=80, weight=1)),
+  # 菠菜：同一 intake 拆分熟/生（若你其实有两个独立列，请改成各自列并 weight=1）
+  513L, "Spinach (cooked)",  list(list(col="Spinach.intake",          portion=80, weight=0.5)),
+  706L, "Spinach (raw)",     list(list(col="Spinach.intake",          portion=80, weight=0.5)),
+  507L, "Sprouts",           list(list(col="Sprouts.intake",          portion=80, weight=1)),
+  139L, "Sweetcorn",         list(list(col="Sweetcorn.intake",        portion=80, weight=1)),
+  571L, "Sweet potato",      list(list(col="Sweet.potato.intake",     portion=130, weight=1)),
+  392L, "Tomato (fresh)",    list(list(col="Fresh.tomato.intake",     portion=80, weight=1)),
+  390L, "Tomato (tinned)",   list(list(col="Tinned.tomato.intake",    portion=200, weight=1)),
+  597L, "Turnip",            list(list(col="Turnip.swede.intake",     portion=80, weight=0.5)),
+  589L, "Swede",             list(list(col="Turnip.swede.intake",     portion=80, weight=0.5)),
+  695L, "Watercress",        list(list(col="Watercress.intake",       portion=80, weight=1)),
+  564L, "Asparagus",         list(list(col="Other.vegetables.intake",        portion=80, weight=0.4)),
+  394L, "Aubergine",         list(list(col="Other.vegetables.intake",        portion=80, weight=0.3)),
+  566L, "Squash (other)",    list(list(col="Other.vegetables.intake",           portion=80, weight=0.3)),
+
+  847L, "Olives - black",    list(list(col="Olives.intake",           portion=50, weight=0.5)),
+  848L, "Olives - green",    list(list(col="Olives.intake",           portion=50, weight=0.5))
+)
+
+# 4) 构建五大类 mg/100g 矩阵（保留）
+flavonoid_subclass_per100g <- build_subclass_matrix(flavonoid.checkout, cols)
+
+# 5) 缺失列检查（可选）
+missing_cols <- lapply(cols, function(v) setdiff(v, colnames(flavonoid.checkout)))
+
+# 6) 平均版函数（新增）
+mean_intake_col <- function(df, col, na_to_zero = TRUE) {
+  if (!col %in% names(df)) return(NA_real_)
+  v <- df[[col]]
+  if (na_to_zero) v[is.na(v)] <- 0
+  mean(v, na.rm = TRUE)
+}
+
+compute_row_mean_contrib <- function(row, na_to_zero = TRUE) {
+  stopifnot(row >= 1, row <= nrow(flavonoid_subclass_per100g))
+  vec <- as.numeric(flavonoid_subclass_per100g[row, ])
+  names(vec) <- colnames(flavonoid_subclass_per100g)
+
+  cfg <- dplyr::filter(row_map, row == !!row)
+  if (nrow(cfg) == 0) return(setNames(rep(0, length(vec)), names(vec)))
+
+  out <- setNames(rep(0, length(vec)), names(vec))
+  for (comp in cfg$components[[1]]) {
+    colname <- comp$col; portion <- comp$portion; weight <- comp$weight
+    m_intake <- mean_intake_col(p.24h.foods.average, colname, na_to_zero = na_to_zero)
+    if (is.na(m_intake)) { warning(sprintf("intake 列不存在: %s（row=%s）", colname, row)); next }
+    grams_mean <- as.numeric(m_intake) * portion
+    out <- out + vec * (grams_mean / 100) * weight
+  }
+  out
+}
+
+compute_mean_contrib_table <- function(rows, na_to_zero = TRUE) {
+  rows <- as.integer(rows)
+  res <- purrr::map(rows, ~{
+    v <- compute_row_mean_contrib(.x, na_to_zero = na_to_zero)
+    tibble(row = .x, subclass = names(v), mean_mg_day = as.numeric(v))
+  }) %>% dplyr::bind_rows() %>%
+    dplyr::left_join(dplyr::select(row_map, row, food), by = "row") %>%
+    dplyr::relocate(food, .after = row) %>%
+    dplyr::group_by(row, food) %>%
+    dplyr::mutate(total_mean_mg_day = sum(mean_mg_day, na.rm = TRUE)) %>%
+    dplyr::ungroup()
+
+  list(
+    per_food_by_subclass_mean = res %>% dplyr::arrange(dplyr::desc(total_mean_mg_day), food, dplyr::desc(mean_mg_day)),
+    per_food_total_mean       = res %>% dplyr::distinct(row, food, total_mean_mg_day) %>% dplyr::arrange(dplyr::desc(total_mean_mg_day)),
+    grand_total_mean          = res %>% dplyr::distinct(row, total_mean_mg_day) %>% dplyr::summarise(sum(total_mean_mg_day), .groups="drop") %>% dplyr::pull(1)
+  )
+}
+
+# 7) 关心的行（保留）
+rows_of_interest <- c(14,15,16,17,32,33,40,50,51,58,59,60,61,85,78,90,89,348,298,366,304,252,300,354,346,369,377,378,307,311,372,373,340,255,319,344,321,305,578,572,576,614,615,623,667,379,610,587,505,565,503,500,592,499,465,559,467,419,522,702,712,521,586,397,513,706,507,139,571,392,390,597,589,695,564,394,566,847,848)
+
+# 8) 调用（替换）
+out_mean <- compute_mean_contrib_table(rows_of_interest, na_to_zero = TRUE)
+
+per_food_total_mean        <- out_mean$per_food_total_mean
+per_food_by_subclass_mean  <- out_mean$per_food_by_subclass_mean
+grand_total_mean           <- out_mean$grand_total_mean
+```
+
+
+
+
+# test loop
+```{r}
+
+### Select the variables into a separate dataset for flavonoid evaluation ###
+diet.tea <- data.frame(matrix(ncol = 2, nrow = nrow(demographics)))
+
+# Select Participant ID and group (column 20) from the baseline dataset
+diet.tea[,1:2] <- demographics[, c(1,27)]
+
+# Rename the columns to match the original variable names
+names(diet.tea) <- c("Participant.ID", "group")
+
+
+sum.tea.values <- function(tea.rows, flavonoid.data, diet.tea) {
+  # Specify the column range from column 9 to column 223
+  start.col <- 9
+  end.col <- 223
+  
+  # Extract the data from the specified column range and replace NAs with 0
+  flavonoid.columns <- flavonoid.data[, start.col:end.col]
+  
+  # Loop through each row in diet.tea (each participant)
+  for (participant in seq_len(nrow(diet.tea))) {
+    
+    # Initialize an empty vector to store the sum of each column for the current participant
+    summed.values <- numeric(ncol(flavonoid.columns))
+    
+    # Loop through each specified tea row and add its values to the summed.values vector
+    for (i in seq_along(tea.rows)) {
+      tea.row <- tea.rows[i]
+      
+      # Multiply by the corresponding p.24h.foods.average value and divide by 240 for each participant
+      if (tea.row == 252) {
+        # Apple (row 252)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ])  * p.24h.foods.average$Apple.intake[participant]) * 80 / 100
+      } else if (tea.row == 69) {
+        # Red wine (row 69)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Red.wine.intake[participant]) * 165.76 / 100
+      } else if (tea.row == 354) {
+        # Berry (row 354)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ])  * p.24h.foods.average$Berry.intake[participant]) * 80 / 100
+      } else if (tea.row == 369) {
+        # Grapefruit (row 369)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Grapefruit.intake[participant]) * 80 / 100
+      } else if (tea.row == 377) {
+        # Grape purple (row = 377)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Grape.intake[participant]) * 80 / 100 *0.32
+      } else if (tea.row == 378) {
+        # Grape green (row = 378)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Grape.intake[participant]) * 80 / 100 *0.68
+      } else if (tea.row == 372) {
+        # Orange intake (row 372)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Orange.intake[participant]) * 80 / 100
+      } else if (tea.row == 373) {
+        # Tangerine intake (row 373)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Satsuma.intake[participant]) * 80 / 100
+      } else if (tea.row == 521) {
+        # Onion intake (row 521)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Onion.intake[participant]) * 80 / 100
+      } else if (tea.row == 397) {
+        # Sweet pepper intake (row 397)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Sweet.pepper.intake[participant]) * 80 / 100
+      } else if (tea.row == 33) {
+        # Dark.chocolate.intake (row 33)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Dark.chocolate.intake[participant]) * 50 / 100
+      } else if (tea.row == 3) {
+        # Black tea (row 3)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Standard.tea.intake[participant]) * 240 / 100
+      } else if (tea.row == 5) {
+        # Green tea (row 5)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Green.tea.intake[participant]) * 240 / 100
+      }
+    }
+    
+    # Add the resulting summed values for this participant as a new row in the diet.tea dataframe
+    # Column names will correspond to the column names in flavonoid_data
+    for (i in seq_along(colnames(flavonoid.columns))) {
+      col.name <- colnames(flavonoid.columns)[i]
+      diet.tea[participant, col.name] <- summed.values[i]
+    }
+  }
+  
+  return(diet.tea)
+}
+
+# Define the tea rows (adjust based on the actual rows you want to sum)
+tea.rows <- c(252, 69, 354, 369, 377, 378, 372, 373, 521, 397, 33, 3, 5)
+
+# Call the function to calculate and update the diet.tea dataframe, incorporating p.24h.foods.average adjustments
+diet.tea <- sum.tea.values(tea.rows, flavonoid.checkout, diet.tea)
+
+write.csv(diet.tea, "flavonoid/test.csv", row.names = FALSE)
+```
+
+
+
+# tea
+https://www.bda.uk.com/resource/fluid-water-drinks.html
+https://link.springer.com/article/10.1007/s00415-023-12065-7 
+tea diffuse
+for tea: 1 mug/cup: 240ml 
+Standard.tea.intake → Tea [Black], infusion -- row 14
+Rooibos.tea.intake → Rooibos tea, brewed -- row 881 (/100*3.21)
+Green.tea.intake → Tea [Green], infusion -- row 5
+Herbal.tea.intake → Tea, herb, chamomile, brewed/ Peppermint, tea -- no flavonoid
+Other.tea.intake
+→ Tea [Oolong], infusion -- row 16
+→ Tea [White], infusion -- row 17
+
+```{r}
+### Select the variables into a separate dataset for flavonoid evaluation ###
+diet.tea <- data.frame(matrix(ncol = 2, nrow = nrow(demographics)))
+
+# Select Participant ID and group (column 20) from the baseline dataset
+diet.tea[,1:2] <- demographics[, c(1,27)]
+
+# Rename the columns to match the original variable names
+names(diet.tea) <- c("Participant.ID", "group")
+
+# Define a function to sum the tea values, adjust with p.24h.foods.average, and add to diet.tea dataframe
+sum.tea.values <- function(tea.rows, flavonoid.data, diet.tea) {
+  # Specify the column range from column 9 to column 223
+  start.col <- 9
+  end.col <- 101
+  
+  # Extract the data from the specified column range and replace NAs with 0
+  flavonoid.columns <- flavonoid.data[, start.col:end.col]
+  
+  # Loop through each row in diet.tea (each participant)
+  for (participant in seq_len(nrow(diet.tea))) {
+    
+    # Initialize an empty vector to store the sum of each column for the current participant
+    summed.values <- numeric(ncol(flavonoid.columns))
+    
+    # Loop through each specified tea row and add its values to the summed.values vector
+    for (i in seq_along(tea.rows)) {
+      tea.row <- tea.rows[i]
+      
+      # Multiply by the corresponding p.24h.foods.average value and divide by 240 for each participant
+      if (tea.row == 14) {
+        # Black tea (row 14)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Standard.tea.intake[participant]) * 240 / 100
+      } else if (tea.row == 881) {
+        # Rooibos tea (row 881)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Rooibos.tea.intake[participant]) * 240 / 100
+      } else if (tea.row == 5) {
+        # Green tea (row 5)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Green.tea.intake[participant]) * 240 / 100
+      } else if (tea.row == 16) {
+        # Other tea (row 16)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Other.tea.intake[participant]) * 240 / 100 /2
+      } else if (tea.row == 17) {
+        # Other tea (row 17)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[tea.row, ]) * p.24h.foods.average$Other.tea.intake[participant]) * 240 / 100 /2
+      }
+    }
+    
+    # Add the resulting summed values for this participant as a new row in the diet.tea dataframe
+    # Column names will correspond to the column names in flavonoid_data
+    for (i in seq_along(colnames(flavonoid.columns))) {
+      col.name <- colnames(flavonoid.columns)[i]
+      diet.tea[participant, col.name] <- summed.values[i]
+    }
+  }
+  
+  return(diet.tea)
+}
+
+# Define the tea rows (adjust based on the actual rows you want to sum)
+tea.rows <- c(14, 881, 5, 16, 17)
+
+# Call the function to calculate and update the diet.tea dataframe, incorporating p.24h.foods.average adjustments
+diet.tea <- sum.tea.values(tea.rows, flavonoid.checkout, diet.tea)
+
+write.csv(diet.tea, "flavonoid/diet.tea.csv", row.names = FALSE)
+```
+
+tableone to describe
+```{r}
+# anthocyanins
+diet.tea$anthocyanins.tea <- diet.tea$Cyanidin + diet.tea$Delphinidin + diet.tea$Malvidin + diet.tea$Pelargonidin + diet.tea$Petunidin + diet.tea$Peonidin
+
+# flavanones 
+diet.tea$flavanones.tea <- diet.tea$Eriodictyol + diet.tea$Hesperetin + diet.tea$Naringenin
+
+# flavan-3-ols # add for Epigallocatechin Gallocatechin Catechin.3.O.gallate Epicatechin.3.O.gallate Epigallocatechin.3.O.gallate
+diet.tea$flavan.3.ols.tea <- diet.tea$X....Catechin + diet.tea$X....Epicatechin + diet.tea$X....Epigallocatechin + diet.tea$X....Gallocatechin + diet.tea$X....Catechin.3.O.gallate + diet.tea$X....Epicatechin.3.O.gallate + diet.tea$X....Gallocatechin.3.O.gallate +  diet.tea$X....Epigallocatechin.3.O.gallate
+
+# flavonols # add for jaceidin, patuletin, spinacetin
+diet.tea$flavonols.tea <- diet.tea$Quercetin + diet.tea$Kaempferol + diet.tea$Myricetin + diet.tea$Isorhamnetin
+
+# flavones
+diet.tea$flavones.tea <- diet.tea$Luteolin + diet.tea$Apigenin
+
+# polymers (including proanthocyanidins [excluding monomers], theaflavins, and thearubigins), proanthocyanidins (dimers, trimers, 4–6mers, 7–10mers, polymers, and monomers). 
+diet.tea$polymers.tea <-  diet.tea$X02.mers + diet.tea$X03.mers + diet.tea$X04.06.mers + diet.tea$X07.10.mers + diet.tea$Polymers...10.mers.
+
+# Proanthocyanidins
+diet.tea$proanthocyanidins.tea <- diet.tea$Theaflavin + diet.tea$Thearubigins
+
+# total flavonoid
+diet.tea$total.flavonoid.tea <- diet.tea$anthocyanins.tea + diet.tea$flavanones.tea + diet.tea$flavan.3.ols.tea + diet.tea$flavonols.tea + diet.tea$flavones + diet.tea$polymers.tea + diet.tea$proanthocyanidins.tea
+
+# Set the 'group' column as a factor with specified levels: 'psoriasis' and 'non-psoriasis'
+diet.tea$group <- factor(diet.tea$group, levels = c("psoriasis", "non-psoriasis"))
+
+# Create a descriptive table for the tea variables (columns 3 to 217) stratified by the 'group'
+vars <- names(diet.tea)[96:103]  # Selecting the variable names from column 3 to 217
+description.tea <- CreateTableOne(data = diet.tea,
+                                  vars = vars,  # Variable names extracted above
+                                  strata = "group")  # Stratified by 'group' column
+
+# Print the description table without quotes, without spaces, and without printing to the console
+print(description.tea, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+description.tea
+
+# Save the descriptive table results to a CSV file
+write.csv(print(description.tea), "flavonoid/tearesult.csv")
+```
+
+
+# chocolate
+1 bar = 50g
+row 32 and 33 is revised from USDA###
+Chocolate.bar.intake → Candies, chocolate covered, caramel with nuts -- row 51
+Dark.chocolate.intake → Chocolate, dark -- row 42
+Milk.chocolate.intake → Chocolate, milk -- row 41
+White.chocolate.intake → no flavonoid 
+https://www.bda.uk.com/resource/fluid-water-drinks.html
+for chocolate drink: 1 mug/cup: 240ml 
+Hot.chocolate.intake → Chocolate milk, beverage -- row 40
+Low.calorie.hot.chocolate.intake → Chocolate milk, beverage -- row 40
+https://www.sainsburys.co.uk/gol-ui/groceries/food-cupboard/biscuits-and-crackers/biscuits/chocolate-biscuits/c:1019467
+1 biscuit = 13.5g
+Chocolate.biscuits.intake → Biscuits, half coated with chocolate -- row 50
+Chocolate.covered.biscuits.intake → Candies, chocolate covered, caramel with nuts -- row 51
+1 handful = 30g
+Chocolate.covered.raisin.intake → Candies, chocolate covered, caramel with nuts -- row 51
+Chocolate.sweet.intake → Candies, chocolate covered, caramel with nuts -- row 51
+
+```{r}
+rm(diet.coffee)
+### Select the variables into a separate dataset for flavonoid evaluation ###
+diet.chocolate <- data.frame(matrix(ncol = 2, nrow = nrow(demographics)))
+
+# Select Participant ID and group (column 20) from the baseline dataset
+diet.chocolate[,1:2] <- demographics[, c(1,27)]
+
+# Rename the columns to match the original variable names
+names(diet.chocolate) <- c("Participant.ID", "group")
+
+# Define a function to sum the chocolate values, adjust with p.24h.foods.average, and add to diet.chocolate dataframe
+sum.chocolate.values <- function(chocolate.rows, flavonoid.data, diet.chocolate) {
+  # Specify the column range from column 9 to column 223
+  start.col <- 9
+  end.col <- 101
+  
+  # Extract the data from the specified column range and replace NAs with 0
+  flavonoid.columns <- flavonoid.data[, start.col:end.col]
+  
+  # Loop through each row in diet.chocolate (each participant)
+  for (participant in seq_len(nrow(diet.chocolate))) {
+    
+    # Initialize an empty vector to store the sum of each column for the current participant
+    summed.values <- numeric(ncol(flavonoid.columns))
+    
+    # Loop through each specified chocolate row and add its values to the summed.values vector
+    for (i in seq_along(chocolate.rows)) {
+      chocolate.row <- chocolate.rows[i]
+      
+      # Multiply by the corresponding p.24h.foods.average value and divide by 240 for each participant
+      if (chocolate.row == 41) {
+    # Milk.chocolate.intake (row 41)
+    summed.values <- summed.values +
+       (as.numeric(flavonoid.columns[chocolate.row, ]) * p.24h.foods.average$Milk.chocolate.intake[participant]) * 50 / 100
+    } else if (chocolate.row == 42) {
+        # Dark.chocolate.intake (row 42)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[chocolate.row, ]) * p.24h.foods.average$Dark.chocolate.intake[participant]) * 50 / 100
+      } else if (chocolate.row == 40) {
+        # (Low) Hot.chocolate.intake (row 40)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[chocolate.row, ]) * p.24h.foods.average$Hot.chocolate.intake[participant]) * 240 / 100 + (as.numeric(flavonoid.columns[chocolate.row, ]) * p.24h.foods.average$Low.calorie.hot.chocolate.intake[participant]) * 240 / 100
+      } else if (chocolate.row == 50) {
+    # Chocolate.biscuits.intake(row 50)
+    summed.values <- summed.values + 
+      (as.numeric(flavonoid.columns[chocolate.row, ]) * p.24h.foods.average$Chocolate.biscuits.intake[participant]) * 13.5 / 100
+    } else if (chocolate.row == 51) {
+    # Chocolate.covered.raisin.intake and Chocolate.covered biscuits intake, chocolate bar, Chocolate.sweet.intake (row 51)
+    summed.values <- summed.values + 
+      (as.numeric(flavonoid.columns[chocolate.row, ]) * p.24h.foods.average$Chocolate.covered.biscuits.intake[participant]) *13.5 / 100 + (as.numeric(flavonoid.columns[chocolate.row, ]) * p.24h.foods.average$Chocolate.covered.raisin.intake[participant]) * 30 / 100 + (as.numeric(flavonoid.columns[chocolate.row, ]) * p.24h.foods.average$Chocolate.bar.intake[participant]) * 50 / 100 + (as.numeric(flavonoid.columns[chocolate.row, ]) * p.24h.foods.average$Chocolate.sweet.intake[participant]) * 30 / 100
+    }
+    }
+    
+    # Add the resulting summed values for this participant as a new row in the diet.chocolate dataframe
+    # Column names will correspond to the column names in flavonoid_data
+    for (i in seq_along(colnames(flavonoid.columns))) {
+      col.name <- colnames(flavonoid.columns)[i]
+      diet.chocolate[participant, col.name] <- summed.values[i]
+    }
+  }
+  
+  return(diet.chocolate)
+}
+
+# Define the chocolate rows (adjust based on the actual rows you want to sum)
+chocolate.rows <- c(41, 42, 40, 50, 51)
+
+# Call the function to calculate and update the diet.chocolate dataframe, incorporating p.24h.foods.average adjustments
+diet.chocolate <- sum.chocolate.values(chocolate.rows, flavonoid.checkout, diet.chocolate)
+diet.chocolate$X....Epicatechin[is.na(diet.chocolate$X....Epicatechin)] <- 0
+write.csv(diet.chocolate, "flavonoid/diet.chocolate.csv", row.names = FALSE)
+```
+
+tableone to describe
+```{r}
+# anthocyanins
+diet.chocolate$anthocyanins.chocolate <- diet.chocolate$Cyanidin + diet.chocolate$Delphinidin + diet.chocolate$Malvidin + diet.chocolate$Pelargonidin + diet.chocolate$Petunidin + diet.chocolate$Peonidin
+
+# flavanones 
+diet.chocolate$flavanones.chocolate <- diet.chocolate$Eriodictyol + diet.chocolate$Hesperetin + diet.chocolate$Naringenin
+
+# flavan-3-ols # add for Epigallocatechin Gallocatechin Catechin.3.O.gallate Epicatechin.3.O.gallate Epigallocatechin.3.O.gallate
+diet.chocolate$flavan.3.ols.chocolate <- diet.chocolate$X....Catechin + diet.chocolate$X....Epicatechin + diet.chocolate$X....Epigallocatechin + diet.chocolate$X....Gallocatechin + diet.chocolate$X....Catechin.3.O.gallate + diet.chocolate$X....Epicatechin.3.O.gallate + diet.chocolate$X....Gallocatechin.3.O.gallate +  diet.chocolate$X....Epigallocatechin.3.O.gallate
+
+# flavonols # add for jaceidin, patuletin, spinacetin
+diet.chocolate$flavonols.chocolate <- diet.chocolate$Quercetin + diet.chocolate$Kaempferol + diet.chocolate$Myricetin + diet.chocolate$Isorhamnetin
+
+# flavones
+diet.chocolate$flavones.chocolate <- diet.chocolate$Luteolin + diet.chocolate$Apigenin
+
+# polymers (including proanthocyanidins [excluding monomers], theaflavins, and thearubigins), proanthocyanidins (dimers, trimers, 4–6mers, 7–10mers, polymers, and monomers). 
+diet.chocolate$polymers.chocolate <-  diet.chocolate$X02.mers + diet.chocolate$X03.mers + diet.chocolate$X04.06.mers + diet.chocolate$X07.10.mers + diet.chocolate$Polymers...10.mers.
+
+# Proanthocyanidins
+diet.chocolate$proanthocyanidins.chocolate <- diet.chocolate$Theaflavin + diet.chocolate$Thearubigins
+
+# total flavonoid
+diet.chocolate$total.flavonoid.chocolate <- diet.chocolate$anthocyanins.chocolate + diet.chocolate$flavanones.chocolate + diet.chocolate$flavan.3.ols.chocolate + diet.chocolate$flavonols.chocolate + diet.chocolate$flavones + diet.chocolate$polymers.chocolate + diet.chocolate$proanthocyanidins.chocolate
+
+# Set the 'group' column as a factor with specified levels: 'psoriasis' and 'non-psoriasis'
+diet.chocolate$group <- factor(diet.chocolate$group, levels = c("psoriasis", "non-psoriasis"))
+
+# Create a descriptive table for the tea variables (columns 3 to 217) stratified by the 'group'
+vars <- names(diet.chocolate)[96:103]  # Selecting the variable names from column 3 to 217
+description.chocolate <- CreateTableOne(data = diet.chocolate,
+                                  vars = vars,  # Variable names extracted above
+                                  strata = "group")  # Stratified by 'group' column
+
+# Print the description table without quotes, without spaces, and without printing to the console
+print(description.chocolate, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+description.chocolate
+
+# Save the descriptive table results to a CSV file
+write.csv(print(description.chocolate), "flavonoid/chocolateresult.csv")
+```
+
+# alcoholic drink
+all wine glass size is use weighted average size
+1 glass red wine = 165.76 ml; 1 glass rose wine = 163.50 ml; 1 glass white wine = 162.96 ml
+Red.wine.intake → Wine [Red] -- row 58
+Rose.wine.intake → Wine [Rosé] -- row 59
+White.wine.intake → Wine [White] -- row 60
+https://www.gov.uk/weights-measures-and-packaging-the-law/specified-quantities
+a sherry/port = 50ml
+Fortified.wine.intake → Sherry -- row 61
+a measure = 25ml
+Spirits.intake → Scotch Whisky -- no flavonoid
+a unit = 125ml
+Other.alcohol.intake -- no flavonoid
+1 pint --> 568ml
+Beer.cider.intake → Beer [Regular] -- row 68
+
+```{r}
+rm(diet.chocolate)
+### Select the variables into a separate dataset for flavonoid evaluation ###
+diet.alcohol <- data.frame(matrix(ncol = 2, nrow = nrow(demographics)))
+
+# Select Participant ID and group (column 20) from the baseline dataset
+diet.alcohol[,1:2] <- demographics[, c(1,27)]
+
+# Rename the columns to match the original variable names
+names(diet.alcohol) <- c("Participant.ID", "group")
+
+# Define a function to sum the alcohol values, adjust with p.24h.foods.average, and add to diet.alcohol dataframe
+sum.alcohol.values <- function(alcohol.rows, flavonoid.data, diet.alcohol) {
+  # Specify the column range from column 9 to column 223
+  start.col <- 9
+  end.col <- 101
+  
+  # Extract the data from the specified column range and replace NAs with 0
+  flavonoid.columns <- flavonoid.data[, start.col:end.col]
+  
+  # Loop through each row in diet.alcohol (each participant)
+  for (participant in seq_len(nrow(diet.alcohol))) {
+    
+    # Initialize an empty vector to store the sum of each column for the current participant
+    summed.values <- numeric(ncol(flavonoid.columns))
+    
+    # Loop through each specified alcohol row and add its values to the summed.values vector
+    for (i in seq_along(alcohol.rows)) {
+      alcohol.row <- alcohol.rows[i]
+      
+      # Multiply by the corresponding p.24h.foods.average value and divide by 240 for each participant
+      if (alcohol.row == 58) {
+        # Red.wine.intake (row 58)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[alcohol.row, ]) * p.24h.foods.average$Red.wine.intake[participant]) * 165.76 / 100
+      } else if (alcohol.row == 59) {
+        # Rose.wine.intake (row 59)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[alcohol.row, ]) * p.24h.foods.average$Rose.wine.intake[participant]) * 163.50 / 100
+      } else if (alcohol.row == 60) {
+        # White.wine.intake (row 60)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[alcohol.row, ]) * p.24h.foods.average$White.wine.intake[participant]) * 162.96 / 100
+      } else if (alcohol.row == 61) {
+        # Fortified.wine.intake (row 61)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[alcohol.row, ]) * p.24h.foods.average$Fortified.wine.intake[participant]) * 50 / 100
+      } else if (alcohol.row == 68) {
+        # Beer.cider.intake (row 68)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[alcohol.row, ]) * p.24h.foods.average$Beer.cider.intake[participant]) * 568 / 100
+      } 
+    }
+    
+    # Add the resulting summed values for this participant as a new row in the diet.alcohol dataframe
+    # Column names will correspond to the column names in flavonoid_data
+    for (i in seq_along(colnames(flavonoid.columns))) {
+      col.name <- colnames(flavonoid.columns)[i]
+      diet.alcohol[participant, col.name] <- summed.values[i]
+    }
+  }
+  
+  return(diet.alcohol)
+}
+
+# Define the alcohol rows (adjust based on the actual rows you want to sum)
+alcohol.rows <- c(58, 59, 60, 61, 68)
+
+# Call the function to calculate and update the diet.alcohol dataframe, incorporating p.24h.foods.average adjustments
+diet.alcohol <- sum.alcohol.values(alcohol.rows, flavonoid.checkout, diet.alcohol)
+
+write.csv(diet.alcohol, "flavonoid/diet.alcohol.csv", row.names = FALSE)
+```
+
+tableone to describe
+```{r}
+# anthocyanins
+diet.alcohol$anthocyanins.alcohol <- diet.alcohol$Cyanidin + diet.alcohol$Delphinidin + diet.alcohol$Malvidin + diet.alcohol$Pelargonidin + diet.alcohol$Petunidin + diet.alcohol$Peonidin
+
+# flavanones 
+diet.alcohol$flavanones.alcohol <- diet.alcohol$Eriodictyol + diet.alcohol$Hesperetin + diet.alcohol$Naringenin
+
+# flavan-3-ols # add for Epigallocatechin Gallocatechin Catechin.3.O.gallate Epicatechin.3.O.gallate Epigallocatechin.3.O.gallate
+diet.alcohol$flavan.3.ols.alcohol <- diet.alcohol$X....Catechin + diet.alcohol$X....Epicatechin + diet.alcohol$X....Epigallocatechin + diet.alcohol$X....Gallocatechin + diet.alcohol$X....Catechin.3.O.gallate + diet.alcohol$X....Epicatechin.3.O.gallate + diet.alcohol$X....Gallocatechin.3.O.gallate +  diet.alcohol$X....Epigallocatechin.3.O.gallate
+
+# flavonols # add for jaceidin, patuletin, spinacetin
+diet.alcohol$flavonols.alcohol <- diet.alcohol$Quercetin + diet.alcohol$Kaempferol + diet.alcohol$Myricetin + diet.alcohol$Isorhamnetin
+
+# flavones
+diet.alcohol$flavones.alcohol <- diet.alcohol$Luteolin + diet.alcohol$Apigenin
+
+# polymers (including proanthocyanidins [excluding monomers], theaflavins, and thearubigins), proanthocyanidins (dimers, trimers, 4–6mers, 7–10mers, polymers, and monomers). 
+diet.alcohol$polymers.alcohol <-  diet.alcohol$X02.mers + diet.alcohol$X03.mers + diet.alcohol$X04.06.mers + diet.alcohol$X07.10.mers + diet.alcohol$Polymers...10.mers.
+
+# Proanthocyanidins
+diet.alcohol$proanthocyanidins.alcohol <- diet.alcohol$Theaflavin + diet.alcohol$Thearubigins
+
+# total flavonoid
+diet.alcohol$total.flavonoid.alcohol <- diet.alcohol$anthocyanins.alcohol + diet.alcohol$flavanones.alcohol + diet.alcohol$flavan.3.ols.alcohol + diet.alcohol$flavonols.alcohol + diet.alcohol$flavones + diet.alcohol$polymers.alcohol + diet.alcohol$proanthocyanidins.alcohol
+
+# Set the 'group' column as a factor with specified levels: 'psoriasis' and 'non-psoriasis'
+diet.alcohol$group <- factor(diet.alcohol$group, levels = c("psoriasis", "non-psoriasis"))
+
+# Create a descriptive table for the tea variables (columns 3 to 217) stratified by the 'group'
+vars <- names(diet.alcohol)[96:103]  # Selecting the variable names from column 3 to 217
+description.alcohol <- CreateTableOne(data = diet.alcohol,
+                                  vars = vars,  # Variable names extracted above
+                                  strata = "group")  # Stratified by 'group' column
+
+# Print the description table without quotes, without spaces, and without printing to the console
+print(description.alcohol, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+description.alcohol
+
+# Save the descriptive table results to a CSV file
+write.csv(print(description.alcohol), "flavonoid/alcoholresult.ap.csv")
+```
+
+# other include drinks -- juice
+1 glass/carton = 250ml
+Orange.juice.intake → Orange juice, raw -- row 85
+Grapefruit.juice.intake → Grapefruit, pure juice -- row 78
+Pure.fruit.vegetable.juice.intake → 
+Fruit juice, freshly squeezed orange, apple, pear, ginger -- row 90
+Fruit.smoothie.intake → Fruit smoothie, banana & strawberry -- row 89
+https://www.mordorintelligence.com/industry-reports/smoothies-market
+https://store.mintel.com/report/uk-fruit-juice-juice-drinks-and-smoothies-market-report-2023
+Dairy.smoothie.intake → no flavonoid
+```{r}
+rm(diet.alcohol)
+### Select the variables into a separate dataset for flavonoid evaluation ###
+diet.juice <- data.frame(matrix(ncol = 2, nrow = nrow(demographics)))
+
+# Select Participant ID and group (column 20) from the baseline dataset
+diet.juice[, 1:2] <- demographics[, c(1,27)]
+
+# Rename the columns to match the original variable names
+names(diet.juice) <- c("Participant.ID", "group")
+
+# Define a function to sum the juice values, adjust with p.24h.foods.average, and add to diet.juice dataframe
+sum.juice.values <- function(juice.rows, flavonoid.data, diet.juice) {
+  # Specify the column range from column 9 to column 223
+  start.col <- 9
+  end.col <- 101
+  
+  # Extract the data from the specified column range and replace NAs with 0
+  flavonoid.columns <- flavonoid.data[, start.col:end.col]
+  
+  # Loop through each row in diet.juice (each participant)
+  for (participant in seq_len(nrow(diet.juice))) {
+    
+    # Initialize an empty vector to store the sum of each column for the current participant
+    summed.values <- numeric(ncol(flavonoid.columns))
+    
+    # Loop through each specified juice row and add its values to the summed.values vector
+    for (i in seq_along(juice.rows)) {
+      juice.row <- juice.rows[i]
+      
+      # Multiply by the corresponding p.24h.foods.average value and divide by 240 for each participant
+      if (juice.row == 85) {
+        # Orange.juice.intake (row 85)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[juice.row, ]) * p.24h.foods.average$Orange.juice.intake[participant]) * 250 / 100
+      } else if (juice.row == 78) {
+        # Grapefruit.juice.intake (row 78)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[juice.row, ]) * p.24h.foods.average$Grapefruit.juice.intake[participant]) * 250 / 100
+      } else if (juice.row == 90) {
+        # Pure.fruit.vegetable.juice.intake (row 90)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[juice.row, ]) * p.24h.foods.average$Pure.fruit.vegetable.juice.intake[participant]) * 250 / 100
+      } else if (juice.row == 88) {
+        # Fruit.smoothie.intake (row 88)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[juice.row, ]) * p.24h.foods.average$Fruit.smoothie.intake[participant]) * 250 / 100
+      }
+    }
+    
+    # Add the resulting summed values for this participant as a new row in the diet.juice dataframe
+    # Column names will correspond to the column names in flavonoid_data
+    for (i in seq_along(colnames(flavonoid.columns))) {
+      col.name <- colnames(flavonoid.columns)[i]
+      diet.juice[participant, col.name] <- summed.values[i]
+    }
+  }
+  
+  return(diet.juice)
+}
+
+# Define the juice rows (adjust based on the actual rows you want to sum)
+juice.rows <- c(85, 78, 90, 88)
+
+# Call the function to calculate and update the diet.juice dataframe, incorporating p.24h.foods.average adjustments
+diet.juice <- sum.juice.values(juice.rows, flavonoid.checkout, diet.juice)
+
+write.csv(diet.juice, "flavonoid/diet.juice.csv", row.names = FALSE)
+```
+
+tableone to describe
+```{r}
+# anthocyanins
+diet.juice$anthocyanins.juice <- diet.juice$Cyanidin + diet.juice$Delphinidin + diet.juice$Malvidin + diet.juice$Pelargonidin + diet.juice$Petunidin + diet.juice$Peonidin
+
+# flavanones 
+diet.juice$flavanones.juice <- diet.juice$Eriodictyol + diet.juice$Hesperetin + diet.juice$Naringenin
+
+# flavan-3-ols # add for Epigallocatechin Gallocatechin Catechin.3.O.gallate Epicatechin.3.O.gallate Epigallocatechin.3.O.gallate
+diet.juice$flavan.3.ols.juice <- diet.juice$X....Catechin + diet.juice$X....Epicatechin + diet.juice$X....Epigallocatechin + diet.juice$X....Gallocatechin + diet.juice$X....Catechin.3.O.gallate + diet.juice$X....Epicatechin.3.O.gallate + diet.juice$X....Gallocatechin.3.O.gallate +  diet.juice$X....Epigallocatechin.3.O.gallate
+
+# flavonols # add for jaceidin, patuletin, spinacetin
+diet.juice$flavonols.juice <- diet.juice$Quercetin + diet.juice$Kaempferol + diet.juice$Myricetin + diet.juice$Isorhamnetin
+
+# flavones
+diet.juice$flavones.juice <- diet.juice$Luteolin + diet.juice$Apigenin
+
+# polymers (including proanthocyanidins [excluding monomers], theaflavins, and thearubigins), proanthocyanidins (dimers, trimers, 4–6mers, 7–10mers, polymers, and monomers). 
+diet.juice$polymers.juice <-  diet.juice$X02.mers + diet.juice$X03.mers + diet.juice$X04.06.mers + diet.juice$X07.10.mers + diet.juice$Polymers...10.mers.
+
+# Proanthocyanidins
+diet.juice$proanthocyanidins.juice <- diet.juice$Theaflavin + diet.juice$Thearubigins
+
+# total flavonoid
+diet.juice$total.flavonoid.juice <- diet.juice$anthocyanins.juice + diet.juice$flavanones.juice + diet.juice$flavan.3.ols.juice + diet.juice$flavonols.juice + diet.juice$flavones + diet.juice$polymers.juice + diet.juice$proanthocyanidins.juice
+
+# Set the 'group' column as a factor with specified levels: 'psoriasis' and 'non-psoriasis'
+diet.juice$group <- factor(diet.juice$group, levels = c("psoriasis", "non-psoriasis"))
+
+# Create a descriptive table for the tea variables (columns 3 to 217) stratified by the 'group'
+vars <- names(diet.juice)[96:103]  # Selecting the variable names from column 3 to 217
+description.juice <- CreateTableOne(data = diet.juice,
+                                  vars = vars,  # Variable names extracted above
+                                  strata = "group")  # Stratified by 'group' column
+
+# Print the description table without quotes, without spaces, and without printing to the console
+print(description.juice, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+description.juice
+
+# Save the descriptive table results to a CSV file
+write.csv(print(description.juice), "flavonoid/juiceresult.csv")
+```
+
+# cereal
+   Dried fruit added to cereal 100800 136,429 in total, 134,057 yes, 2,372 varied
+    → fruit and fibre -- 101 (Dried fruit e.g. raisins 30g)
+   Milk added to cereal 100890 246,475 in total, 245,241 yes, 1,234 varied 
+    → no polyphenol and flavonoid not consider
+https://www.bda.uk.com/resource/food-facts-portion-sizes.html
+a bowl = all are uncooked -- so use the portion size to calculate
+breakfast cereals = 30g
+porridge oats = 40g
+Porridge intake → Cereals, oats, regular and quick and instant, not fortified, dry -- row 106
+Muesli intake → Breakfast cereal, muesli -- row 92
+Oat crunch intake → Cereals, oats, regular and quick and instant, not fortified, dry -- row 106
+Plain cereal intake → no flavonoid
+Bran cereal intake → Breakfast cereals, bran -- row 93
+Whole-wheat cereal intake → Cereals ready-to-eat, WEETABIX WHOLE WHEAT CEREAL -- row 104
+
+    through british nutrition Full portion size list.
+Sliced bread intake -- (a sliced = 35g) 
+Baguette intake -- (a baguette/ciabatta/panini/sub = 140g)
+Bap intake -- (1 big bap/stotty/pitta = 45g)
+Bread roll intake -- (1 roll/bap/bun/bagel = 60g)
+ → white: no flavonoid -- 53/74*0.9
+ → mixed: 50:50 white and whole 
+ → wholemeal: Bread, common wheat, whole grain flour -- row 120 48/64*0.9 
+ → seeded: Seeded bread, brown -- row 202
+ → others: Flour mix, gluten free -- row 167  (coefficient = 0.6)
+
+Naan bread intake → Naan bread -- row 884 (1 naan = 140g)
+Garlic bread intake → Garlic bread -- row 164 (a sliced = 35g)
+Crispbread intake → crisp bread, seeded -- row 166 (1 cracker/crispbread/cake = 8g)
+Oatcakes intake →	Oat, rolled -- row 134 (1 oatcake = 12g)
+other bread  → Crumpets, fresh -- 153 (1 slice/wrap/stick/item = 60g)(50g to 65g) 
+
+https://www.gov.uk/government/publications/school-food-standards-resources-for-schools/portion-sizes-and-food-groups
+White pasta intake → Pasta -- row 217 (1 serving = 180g)
+Wholemeal pasta intake → Pasta, whole grain -- row 135 (1 serving = 180g)
+White rice intake → no flavonoid
+Brown rice intake → Brown rice, boiled -- row 196 (1 serving = 180g)
+Sushi intake → no flavonoid
+Snackpot intake → Savoury rice, incl meat & veg varieties, eg. Batchelors, as sold -- row 180 (1 pot = 65g)
+Couscous intake → Couscous, cooked -- row 128 (1 serving = 150g)
+Other grain intake → Quinoa & Wholegrain Rice -- row 203 (1 serving = 180g)
+
+## preprocess the bread part
+```{r}
+rm(diet.juice)
+appendixfood <- read.csv("24hr/appendixtofoods.csv") %>%
+  filter(Participant.ID %in% demographics$Participant.ID)
+# Replace "half" with 0.5, "6+" with 6, and convert to numeric, replacing NAs with 0
+appendixfood <- appendixfood %>%
+  mutate(across(contains("intake"), ~ gsub("half", "0.5", .))) %>%
+  mutate(across(contains("intake"), ~ gsub("6\\+", "6", .))) %>%
+  mutate(across(contains("intake"), ~ ifelse(is.na(.), "0", .))) %>%   # Replace NA with "0"
+  mutate(across(contains("intake"), as.numeric))  # Convert to numeric
+
+# Get all column names for intake related to bread types
+sliced_intake_columns <- paste0("Sliced.bread.intake...Instance.", 0:4)
+baguette_intake_columns <- paste0("Baguette.intake...Instance.", 0:4)
+bap_intake_columns <- paste0("Bap.intake...Instance.", 0:4)
+bread_roll_intake_columns <- paste0("Bread.roll.intake...Instance.", 0:4)
+
+# Define the correct type columns for each bread type
+sliced_type_columns <- paste0("Type.of.sliced.bread.eaten...Instance.", 0:4)
+baguette_type_columns <- paste0("Type.of.baguette.eaten...Instance.", 0:4)  # Corrected this
+bap_type_columns <- paste0("Type.of.large.bap.eaten...Instance.", 0:4)
+bread_roll_type_columns <- paste0("Type.of.bread.roll.eaten...Instance.", 0:4)
+
+
+# Replace all NA values in intake columns with 0
+appendixfood <- appendixfood %>%
+  mutate(across(contains("intake"), ~ ifelse(is.na(.), 0, .)))
+
+# Function to calculate mean intake by type (wholemeal, white, mixed, seeded, others)
+calc_mean_by_type <- function(data_row, type, type_columns, intake_columns) {
+  # For each column, check if the type is present and return the intake value, otherwise return 0
+  intake_values <- mapply(function(type_col, intake_col) {
+    ifelse(grepl(type, data_row[[type_col]]), data_row[[intake_col]], 0)
+  }, type_columns, intake_columns)
+  
+  # Calculate the mean of the intake values
+  mean(intake_values)
+}
+
+appendixfood <- appendixfood %>%
+  rowwise() %>%
+  
+  # Sliced Bread
+  mutate(sliced_wholemeal.mean = calc_mean_by_type(cur_data(), "wholemeal", sliced_type_columns, sliced_intake_columns),
+         sliced_white.mean = calc_mean_by_type(cur_data(), "white", sliced_type_columns, sliced_intake_columns),
+         sliced_mixed.mean = calc_mean_by_type(cur_data(), "mixed", sliced_type_columns, sliced_intake_columns),
+         sliced_seeded.mean = calc_mean_by_type(cur_data(), "seeded", sliced_type_columns, sliced_intake_columns),
+         sliced_others.mean = calc_mean_by_type(cur_data(), "others", sliced_type_columns, sliced_intake_columns)) %>%
+  
+  # Baguette
+  mutate(baguette_wholemeal.mean = calc_mean_by_type(cur_data(), "wholemeal", baguette_type_columns, baguette_intake_columns),
+         baguette_white.mean = calc_mean_by_type(cur_data(), "white", baguette_type_columns, baguette_intake_columns),
+         baguette_mixed.mean = calc_mean_by_type(cur_data(), "mixed", baguette_type_columns, baguette_intake_columns),
+         baguette_seeded.mean = calc_mean_by_type(cur_data(), "seeded", baguette_type_columns, baguette_intake_columns),
+         baguette_others.mean = calc_mean_by_type(cur_data(), "others", baguette_type_columns, baguette_intake_columns)) %>%
+  
+  # Bap
+  mutate(bap_wholemeal.mean = calc_mean_by_type(cur_data(), "wholemeal", bap_type_columns, bap_intake_columns),
+         bap_white.mean = calc_mean_by_type(cur_data(), "white", bap_type_columns, bap_intake_columns),
+         bap_mixed.mean = calc_mean_by_type(cur_data(), "mixed", bap_type_columns, bap_intake_columns),
+         bap_seeded.mean = calc_mean_by_type(cur_data(), "seeded", bap_type_columns, bap_intake_columns),
+         bap_others.mean = calc_mean_by_type(cur_data(), "others", bap_type_columns, bap_intake_columns)) %>%
+  
+  # Bread Roll
+  mutate(bread_roll_wholemeal.mean = calc_mean_by_type(cur_data(), "wholemeal", bread_roll_type_columns, bread_roll_intake_columns),
+         bread_roll_white.mean = calc_mean_by_type(cur_data(), "white", bread_roll_type_columns, bread_roll_intake_columns),
+         bread_roll_mixed.mean = calc_mean_by_type(cur_data(), "mixed", bread_roll_type_columns, bread_roll_intake_columns),
+         bread_roll_seeded.mean = calc_mean_by_type(cur_data(), "seeded", bread_roll_type_columns, bread_roll_intake_columns),
+         bread_roll_others.mean = calc_mean_by_type(cur_data(), "others", bread_roll_type_columns, bread_roll_intake_columns)) %>%
+  
+  ungroup()
+
+# Save the bread data
+appendix <- appendixfood[,c(1, 87:106)]
+write.csv(appendix, "flavonoid/processed bread data.csv", row.names = FALSE)
+```
+
+do the flavonoid and polyphenol for cereal
+```{r}
+appendix <- read.csv("flavonoid/processed bread data.csv")
+### Select the variables into a separate dataset for flavonoid evaluation ###
+diet.cereal <- data.frame(matrix(ncol = 2, nrow = nrow(demographics)))
+
+# Select Participant ID and group (column 20) from the baseline dataset
+diet.cereal[,1:2] <- demographics[, c(1,27)]
+
+# Rename the columns to match the original variable names
+names(diet.cereal) <- c("Participant.ID", "group")
+
+# Define a function to sum the cereal values, adjust with p.24h.foods.average, and add to diet.cereal dataframe
+sum.cereal.values <- function(cereal.rows, flavonoid.data, diet.cereal) {
+  # Specify the column range from column 9 to column 223
+  start.col <- 9
+  end.col <- 101
+  
+  # Extract the data from the specified column range and replace NAs with 0
+  flavonoid.columns <- flavonoid.data[, start.col:end.col]
+  
+  # Loop through each row in diet.cereal (each participant)
+  for (participant in seq_len(nrow(diet.cereal))) {
+    
+    # Initialize an empty vector to store the sum of each column for the current participant
+    summed.values <- numeric(ncol(flavonoid.columns))
+    
+    # Loop through each specified cereal row and add its values to the summed.values vector
+    for (i in seq_along(cereal.rows)) {
+      cereal.row <- cereal.rows[i]
+      
+      # Multiply by the corresponding p.24h.foods.average value and divide by 240 for each participant
+      if (cereal.row == 106) {
+        # Porridge intake and Oat crunch intake (row 106)
+        summed.values <- summed.values + 
+      (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Porridge.intake[participant]) *40 /100 +
+       (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Oat.crunch.intake[participant]) * 30 / 100
+      } else if (cereal.row == 92) {
+        # Muesli.intake (row 92)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Muesli.intake[participant]) * 30 / 100
+      } else if (cereal.row == 93) {
+        # Bran.cereal.intake (row 93)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Bran.cereal.intake[participant]) * 30 / 100
+      } else if (cereal.row == 104) {
+        # Whole.wheat.cereal.intake (row 104)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Whole.wheat.cereal.intake[participant]) * 30 / 100
+      } else if (cereal.row == 120) {
+        # Sliced.bread, baguette, bap, bread roll -- wholemeal (row 120)
+        summed.values <- summed.values + ((as.numeric(flavonoid.columns[cereal.row, ]) * appendix$sliced_wholemeal.mean[participant]) * 35 / 100 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$baguette_wholemeal.mean[participant]) * 140 / 100 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$bap_wholemeal.mean[participant]) * 45 / 100 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$bread_roll_wholemeal.mean[participant]) * 60 / 100 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$sliced_mixed.mean[participant]) * 35 / 100 *0.5 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$baguette_mixed.mean[participant]) * 140 / 100 *0.5 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$bap_mixed.mean[participant]) * 45 / 100 *0.5 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$bread_roll_mixed.mean[participant]) * 60 / 100 *0.5)* 48/64*0.9 
+      } else if (cereal.row == 202) {
+        # Sliced.bread, baguette, bap, bread roll -- seeded (row 202)
+         summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$sliced_seeded.mean[participant]) * 35 / 100 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$baguette_seeded.mean[participant]) * 140 / 100 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$bap_seeded.mean[participant]) * 45 / 100 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$bread_roll_seeded.mean[participant]) * 60 / 100
+      } else if (cereal.row == 167) {
+        # Sliced.bread, baguette, bap, bread roll -- others (row 167)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$sliced_others.mean[participant]) * 35 / 100 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$baguette_others.mean[participant]) * 140 / 100 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$bap_others.mean[participant]) * 45 / 100 + (as.numeric(flavonoid.columns[cereal.row, ]) * appendix$bread_roll_others.mean[participant]) * 60 / 100
+      } else if (cereal.row == 884) {
+        # Naan bread intake (row 884)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Naan.bread.intake[participant]) * 140 / 100 
+      } else if (cereal.row == 164) {
+        # Garlic bread intake (row 164)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Garlic.bread.intake[participant]) * 35 / 100 
+      } else if (cereal.row == 166) {
+        # Crispbread intake (row 166)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Crispbread.intake[participant]) * 8 / 100 
+      } else if (cereal.row == 134) {
+        # Oatcakes intake (row 134)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Oatcakes.intake[participant]) * 12 / 100 
+      } else if (cereal.row == 153) {
+        # Other bread intake -- tortilla wraps,corn (row 153)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Other.bread.intake[participant]) * 60 / 100
+      } else if (cereal.row == 217) {
+        # White pasta intake (row 217)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$White.pasta.intake[participant]) * 180 / 100
+      } else if (cereal.row == 135) {
+        # Wholemeal pasta intake (row 135)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Wholemeal.pasta.intake[participant]) * 180 / 100
+      } else if (cereal.row == 196) {
+        # Brown rice intake (row 196)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Brown.rice.intake[participant]) * 180 / 100
+      } else if (cereal.row == 180) {
+        # Snackpot intake (row 180)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Snackpot.intake[participant]) * 65 / 100
+      } else if (cereal.row == 128) {
+        # Couscous intake (row 128)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Couscous.intake[participant]) * 150 / 100
+      } else if (cereal.row == 203) {
+        # Other grain intake (row 203)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[cereal.row, ]) * p.24h.foods.average$Other.grain.intake[participant]) * 180 / 100
+      }
+    }
+    
+    # Add the resulting summed values for this participant as a new row in the diet.cereal dataframe
+    # Column names will correspond to the column names in flavonoid_data
+    for (i in seq_along(colnames(flavonoid.columns))) {
+      col.name <- colnames(flavonoid.columns)[i]
+      diet.cereal[participant, col.name] <- summed.values[i]
+    }
+  }
+  
+  return(diet.cereal)
+}
+
+# Define the cereal rows (adjust based on the actual rows you want to sum)
+cereal.rows <- c(106, 92, 93, 104, 120, 202, 167, 884, 164, 166, 133, 153, 217, 135, 196, 180, 128)
+
+# Call the function to calculate and update the diet.cereal dataframe, incorporating p.24h.foods.average adjustments
+diet.cereal <- sum.cereal.values(cereal.rows, flavonoid.checkout, diet.cereal)
+
+write.csv(diet.cereal, "flavonoid/diet.cereal.csv", row.names = FALSE)
+```
+
+tableone to describe
+```{r}
+# anthocyanins
+diet.cereal$anthocyanins.cereal <- diet.cereal$Cyanidin + diet.cereal$Delphinidin + diet.cereal$Malvidin + diet.cereal$Pelargonidin + diet.cereal$Petunidin + diet.cereal$Peonidin
+
+# flavanones 
+diet.cereal$flavanones.cereal <- diet.cereal$Eriodictyol + diet.cereal$Hesperetin + diet.cereal$Naringenin
+
+# flavan-3-ols # add for Epigallocatechin Gallocatechin Catechin.3.O.gallate Epicatechin.3.O.gallate Epigallocatechin.3.O.gallate
+diet.cereal$flavan.3.ols.cereal <- diet.cereal$X....Catechin + diet.cereal$X....Epicatechin + diet.cereal$X....Epigallocatechin + diet.cereal$X....Gallocatechin + diet.cereal$X....Catechin.3.O.gallate + diet.cereal$X....Epicatechin.3.O.gallate + diet.cereal$X....Gallocatechin.3.O.gallate +  diet.cereal$X....Epigallocatechin.3.O.gallate
+
+# flavonols # add for jaceidin, patuletin, spinacetin
+diet.cereal$flavonols.cereal <- diet.cereal$Quercetin + diet.cereal$Kaempferol + diet.cereal$Myricetin + diet.cereal$Isorhamnetin
+
+# flavones
+diet.cereal$flavones.cereal <- diet.cereal$Luteolin + diet.cereal$Apigenin
+
+# polymers (including proanthocyanidins [excluding monomers], theaflavins, and thearubigins), proanthocyanidins (dimers, trimers, 4–6mers, 7–10mers, polymers, and monomers). 
+diet.cereal$polymers.cereal <-  diet.cereal$X02.mers + diet.cereal$X03.mers + diet.cereal$X04.06.mers + diet.cereal$X07.10.mers + diet.cereal$Polymers...10.mers.
+
+# Proanthocyanidins
+diet.cereal$proanthocyanidins.cereal <- diet.cereal$Theaflavin + diet.cereal$Thearubigins
+
+# total flavonoid
+diet.cereal$total.flavonoid.cereal <- diet.cereal$anthocyanins.cereal + diet.cereal$flavanones.cereal + diet.cereal$flavan.3.ols.cereal + diet.cereal$flavonols.cereal + diet.cereal$flavones + diet.cereal$polymers.cereal + diet.cereal$proanthocyanidins.cereal
+
+# Set the 'group' column as a factor with specified levels: 'psoriasis' and 'non-psoriasis'
+diet.cereal$group <- factor(diet.cereal$group, levels = c("psoriasis", "non-psoriasis"))
+
+# Create a descriptive table for the tea variables (columns 3 to 217) stratified by the 'group'
+vars <- names(diet.cereal)[96:103]  # Selecting the variable names from column 3 to 217
+description.cereal <- CreateTableOne(data = diet.cereal,
+                                  vars = vars,  # Variable names extracted above
+                                  strata = "group")  # Stratified by 'group' column
+
+# Print the description table without quotes, without spaces, and without printing to the console
+print(description.cereal, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+description.cereal
+
+
+# Save the descriptive table results to a CSV file
+write.csv(print(description.cereal), "flavonoid/cerealresult.csv")
+```
+
+
+
+# fruit
+Stewed fruit intake 80g
+ → Apples, cooking, stewed with sugar, flesh only -- row 348
+Prune intake → Plum, prune -- row 298 1handful 30g
+Dried fruit intake → Dried mixed fruit -- row 366 30g
+Mixed fruit intake → Fruit salad, (peach and pear and apricot and pineapple and cherry), canned, heavy syrup, solids and liquids -- row 304 80g
+Apple intake → Apple [Dessert], eating apple, whole -- row 252 80g
+Banana intake → Banana, raw -- row 300 80g
+Berry intake 
+→ Mixed berry -- row 354 80g
+Cherry intake → Sweet cherry, raw -- row 346 1handful 80g
+Grapefruit intake → Grapefruit, raw -- row 369 1serving 80g
+https://www.fruitnet.com/fresh-produce-journal/when-why-and-where-uk-eats-its-grapes/135392.article
+Grape intake 80g
+ → Grape [Black] -- row 377 32%
+ → Grape [Green] -- row 378 68%
+Mango intake → Mango -- row 307 80g
+Melon intake → Melons, cantaloupe, raw -- row 311 1serving 80g
+Orange intake → Orange [Blond] -- row 372 80g
+Satsuma intake → Tangerine -- row 373 80g
+Peach/Nectarine intake → Peach, whole -- row 340 80g
+Pear intake → Pear, whole -- row 255 80g
+Pineapple intake → Pineapple, raw -- row 319 80g
+Plum intake → Plum, fresh -- row 344 40g
+Other fruit intake 80g
+ → Pomegranate -- row 321
+ → Kiwi -- row 305
+
+
+```{r}
+rm(diet.vegan)
+### Select the variables into a separate dataset for flavonoid evaluation ###
+diet.fruit <- data.frame(matrix(ncol = 2, nrow = nrow(demographics)))
+
+# Select Participant ID and group (column 20) from the baseline dataset
+diet.fruit[,1:2] <- demographics[, c(1,27)]
+
+# Rename the columns to match the original variable names
+names(diet.fruit) <- c("Participant.ID", "group")
+
+# Define a function to sum the fruit values, adjust with p.24h.foods.average, and add to diet.fruit dataframe
+sum.fruit.values <- function(fruit.rows, flavonoid.data, diet.fruit) {
+  # Specify the column range from column 9 to column 223
+  start.col <- 9
+  end.col <- 101
+  
+  # Extract the data from the specified column range and replace NAs with 0
+  flavonoid.columns <- flavonoid.data[, start.col:end.col]
+  
+  # Loop through each row in diet.fruit (each participant)
+  for (participant in seq_len(nrow(diet.fruit))) {
+    
+    # Initialize an empty vector to store the sum of each column for the current participant
+    summed.values <- numeric(ncol(flavonoid.columns))
+    
+    # Loop through each specified fruit row and add its values to the summed.values vector
+    for (i in seq_along(fruit.rows)) {
+      fruit.row <- fruit.rows[i]
+      
+      # Multiply by the corresponding p.24h.foods.average value and divide by 240 for each participant
+      if (fruit.row == 348) {
+        # Stewed fruit intake - Apples (row 348)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Stewed.fruit.intake[participant]) * 80 / 100
+      } else if (fruit.row == 298) {
+        # Prune intake (row 298)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Prune.intake[participant]) * 30 / 100
+      } else if (fruit.row == 366) {
+        # Dried fruit intake (row 366)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Dried.fruit.intake[participant]) * 30 / 100
+      } else if (fruit.row == 304) {
+        # Mixed fruit intake (row 304)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Mixed.fruit.intake[participant]) * 80 / 100
+      } else if (fruit.row == 252) {
+        # Apple intake (row 252)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Apple.intake[participant]) * 80 / 100
+      } else if (fruit.row == 300) {
+        # Banana intake (row 300)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Banana.intake[participant]) * 80 / 100
+      } else if (fruit.row == 354) {
+        # berry intake (row 354)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Berry.intake[participant]) * 80 / 100
+      } else if (fruit.row == 346) {
+        # Cherry intake (row 346)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Cherry.intake[participant]) * 80 / 100
+      } else if (fruit.row == 369) {
+        # Grapefruit intake (row 369)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Grapefruit.intake[participant]) * 80 / 100
+      } else if (fruit.row == 377) {
+        # Grape intake - black (row 377)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Grape.intake[participant]) * 80 / 100 *0.32
+      } else if (fruit.row == 378) {
+        # Grape intake - green (row 378)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Grape.intake[participant]) * 80 / 100 *0.68
+      } else if (fruit.row == 307) {
+        # Mango intake (row 307)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Mango.intake[participant]) * 80 / 100
+      } else if (fruit.row == 311) {
+        # Melon intake (row 311)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Melon.intake[participant]) * 80 / 100
+      } else if (fruit.row == 372) {
+        # Orange intake (row 372)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Orange.intake[participant]) * 80 / 100
+      } else if (fruit.row == 373) {
+        # Tangerine intake (row 373)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Satsuma.intake[participant]) * 80 / 100
+      } else if (fruit.row == 340) {
+        # Peach intake (row 340)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Peach.nectarine.intake[participant]) * 80 / 100
+      } else if (fruit.row == 255) {
+        # Pear intake (row 255)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Pear.intake[participant]) * 80 / 100
+      } else if (fruit.row == 319) {
+        # Pineapple intake (row 319)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Pineapple.intake[participant]) * 80 / 100
+      } else if (fruit.row == 344) {
+        # Plum intake (row 344)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Plum.intake[participant]) * 40 / 100
+      } else if (fruit.row == 321) {
+        # Other fruit intake - pomegranate (row 321)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Other.fruit.intake[participant]) * 80 / 100 *0.5
+      } else if (fruit.row == 305) {
+        # Other fruit intake - kiwi (row 305)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[fruit.row, ]) * p.24h.foods.average$Other.fruit.intake[participant]) * 80 / 100 *0.5
+      }
+    }
+    
+    # Add the resulting summed values for this participant as a new row in the diet.fruit dataframe
+    # Column names will correspond to the column names in flavonoid_data
+    for (i in seq_along(colnames(flavonoid.columns))) {
+      col.name <- colnames(flavonoid.columns)[i]
+      diet.fruit[participant, col.name] <- summed.values[i]
+    }
+  }
+  
+  return(diet.fruit)
+}
+
+# Define the fruit rows (adjust based on the actual rows you want to sum)
+fruit.rows <- c(348, 298, 366, 304, 252, 300, 354, 346, 369, 377, 378, 307, 311, 372, 373, 340, 255, 319, 344, 321, 305)
+
+# Call the function to calculate and update the diet.fruit dataframe, incorporating p.24h.foods.average adjustments
+diet.fruit <- sum.fruit.values(fruit.rows, flavonoid.checkout, diet.fruit)
+
+write.csv(diet.fruit, "flavonoid/diet.fruit.csv", row.names = FALSE)
+```
+
+tableone to describe
+```{r}
+# anthocyanins
+diet.fruit$anthocyanins.fruit <- diet.fruit$Cyanidin + diet.fruit$Delphinidin + diet.fruit$Malvidin + diet.fruit$Pelargonidin + diet.fruit$Petunidin + diet.fruit$Peonidin
+
+# flavanones 
+diet.fruit$flavanones.fruit <- diet.fruit$Eriodictyol + diet.fruit$Hesperetin + diet.fruit$Naringenin
+
+# flavan-3-ols # add for Epigallocatechin Gallocatechin Catechin.3.O.gallate Epicatechin.3.O.gallate Epigallocatechin.3.O.gallate
+diet.fruit$flavan.3.ols.fruit <- diet.fruit$X....Catechin + diet.fruit$X....Epicatechin + diet.fruit$X....Epigallocatechin + diet.fruit$X....Gallocatechin + diet.fruit$X....Catechin.3.O.gallate + diet.fruit$X....Epicatechin.3.O.gallate + diet.fruit$X....Gallocatechin.3.O.gallate +  diet.fruit$X....Epigallocatechin.3.O.gallate
+
+# flavonols # add for jaceidin, patuletin, spinacetin
+diet.fruit$flavonols.fruit <- diet.fruit$Quercetin + diet.fruit$Kaempferol + diet.fruit$Myricetin + diet.fruit$Isorhamnetin
+
+# flavones
+diet.fruit$flavones.fruit <- diet.fruit$Luteolin + diet.fruit$Apigenin
+
+# polymers (including proanthocyanidins [excluding monomers], theaflavins, and thearubigins), proanthocyanidins (dimers, trimers, 4–6mers, 7–10mers, polymers, and monomers). 
+diet.fruit$polymers.fruit <-  diet.fruit$X02.mers + diet.fruit$X03.mers + diet.fruit$X04.06.mers + diet.fruit$X07.10.mers + diet.fruit$Polymers...10.mers.
+
+# Proanthocyanidins
+diet.fruit$proanthocyanidins.fruit <- diet.fruit$Theaflavin + diet.fruit$Thearubigins
+
+# total flavonoid
+diet.fruit$total.flavonoid.fruit <- diet.fruit$anthocyanins.fruit + diet.fruit$flavanones.fruit + diet.fruit$flavan.3.ols.fruit + diet.fruit$flavonols.fruit + diet.fruit$flavones + diet.fruit$polymers.fruit + diet.fruit$proanthocyanidins.fruit
+
+# Set the 'group' column as a factor with specified levels: 'psoriasis' and 'non-psoriasis'
+diet.fruit$group <- factor(diet.fruit$group, levels = c("psoriasis", "non-psoriasis"))
+
+# Create a descriptive table for the tea variables (columns 3 to 217) stratified by the 'group'
+vars <- names(diet.fruit)[96:103]  # Selecting the variable names from column 3 to 217
+description.fruit <- CreateTableOne(data = diet.fruit,
+                                  vars = vars,  # Variable names extracted above
+                                  strata = "group")  # Stratified by 'group' column
+
+# Print the description table without quotes, without spaces, and without printing to the console
+print(description.fruit, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+description.fruit
+
+# Save the descriptive table results to a CSV file
+write.csv(print(description.fruit), "flavonoid/fruitresult.csv")
+```
+
+
+# vegetables
+Fried potatoes intake → potato, fried -- row 578 1 serving 180g
+Boiled/baked potatoes intake → New potatoes, in skins, boiled in unsalted water -- row 572 1 serving 180g
+Mashed potato intake → Old potatoes, mashed with butter -- row 576 1 serving 180g
+Mixed vegetable intake → Mixed vegetables, frozen, boiled in salted water -- row 614 1 serving 80g
+Vegetable pieces intake → Mixed vegetables, stir-fry type, frozen, fried in blenden oil -- row 615 1 serving 80g
+Coleslaw intake → coleslaw -- row 623 1 serving 80g
+Side salad intake → Salad, mixed, with olive oil dressing -- row 667 1 serving 80g
+Avocado intake → Avocado, raw -- row 379 1 medium 160g
+Green bean intake → Green beans, raw -- row 610 1 serving 80g  boiling 0.93
+Beetroot intake → Beetroot, boiled in salted water -- row 587 1 serving 80g
+Broccoli intake → Broccoli, green, boiled in salted water -- row 505 1 serving 80g
+Butternut squash intake → Squash, butternut, baked -- row 565 1 serving 80g
+Cabbage/kale intake  --- not find proportion, assume 50:50 1 serving 80g
+→ Cabbage, boiled in unsalted water, average -- row 503
+→ Curly kale, boiled in salted water -- row 500
+Carrot intake → Carrots, boiled in unsalted water -- row 592 1 serving 80g
+Cauliflower intake → Cauliflower, boiled in un salted water -- row 499 1 serving 80g
+Celery intake → Celery stalks, fresh, raw -- row 465 1 stick 26.7g
+Courgette intake → Courgette, boiled in unsalted water -- row 559 1 serving 80g
+Cucumber intake → Cucumber, raw -- row 467 1 inch 32g
+Garlic intake → Garlic, fresh, raw -- row 419 1 clove 5g
+Leek intake → Leeks, boiled in salted water -- row 522 1 serving 80g
+Lettuce intake → Lettuce [Green], raw -- row 702 1 serving 80g
+Mushroom intake → •	Mushrooms, fried -- row 712 1 serving 80g
+Onion intake → Onions, boiled in unsalted water -- row 521 1 serving 80g
+Parsnip intake → Parsnip, boiled in unsalted water -- row 586 1 serving 80g
+Sweet pepper intake → Peppers, mixed, stir fried in olive oil -- row 397 1 pepper 80g
+Spinach intake 1 serving 80g
+→ Spinach, boiled in salted water -- row 513
+→ Spinach, raw -- row 706
+Sprouts intake → Brussels sprouts, boiled in unsalted water -- row 507 1 serving 80g
+Sweetcorn intake → Corn, sweet, yellow, steamed -- row 139 1 serving 80g
+Sweet potato intake → Sweet potato, baked -- row 571 1 serving  130g (range between 100 to 150)
+Fresh tomato intake → Tomatoes, whole, raw -- row 392 1 medium 80g
+Tinned tomato intake → Tomatoes, red, ripe, canned, packed in tomato juice -- row 390  1 serving 200g
+Turnip/swede intake --- not find proportion, assume 50:50 1 serving 80g
+→ Turnip, boiled in unsalted water -- row 597
+→ Swede, boiled in unsalted water -- row 589
+Watercress intake → Watercress, raw -- row 695 1 serving 80g
+https://www.bda.uk.com/food-health/your-health/sustainable-diets/seasonal-fruit-and-veg-a-handy-guide.html
+https://www.waitrose.com/ecom/recipe/aubergine-and-butternut-squash-bake
+https://www.diabetes.org.uk/guide-to-diabetes/enjoy-food/cooking-for-people-with-diabetes/seasonal-cooking/winter-fruit-and-veg
+Other vegetables intake  1 serving 80g
+→ Asparagus, boiled in salted water -- row 564   40%
+→ Aubergine, fried in blended oil -- row 394    30%
+→ Squash, Spaghetti, baked -- row 566    30%
+
+```{r}
+rm(diet.fruit)
+### Select the variables into a separate dataset for flavonoid evaluation ###
+diet.vegetable <- data.frame(matrix(ncol = 2, nrow = nrow(demographics)))
+
+# Select Participant ID and group (column 20) from the baseline dataset
+diet.vegetable[,1:2] <- demographics[, c(1,27)]
+
+# Rename the columns to match the original variable names
+names(diet.vegetable) <- c("Participant.ID", "group")
+
+# Define a function to sum the vegetable values, adjust with p.24h.foods.average, and add to diet.vegetable dataframe
+sum.vegetable.values <- function(vegetable.rows, flavonoid.data, diet.vegetable) {
+  # Specify the column range from column 9 to column 223
+  start.col <- 9
+  end.col <- 101
+  
+  # Extract the data from the specified column range and replace NAs with 0
+  flavonoid.columns <- flavonoid.data[, start.col:end.col]
+  
+  # Loop through each row in diet.vegetable (each participant)
+  for (participant in seq_len(nrow(diet.vegetable))) {
+    
+    # Initialize an empty vector to store the sum of each column for the current participant
+    summed.values <- numeric(ncol(flavonoid.columns))
+    
+    # Loop through each specified vegetable row and add its values to the summed.values vector
+    for (i in seq_along(vegetable.rows)) {
+      vegetable.row <- vegetable.rows[i]
+      
+      # Multiply by the corresponding p.24h.foods.average value and divide by 240 for each participant
+      if (vegetable.row == 578) {
+        # Fried potatoes intake (row 578)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Fried.potatoes.intake[participant]) * 180 / 100
+      } else if (vegetable.row == 572) {
+        # Boiled/baked potatoes intake (row 572)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Boiled.baked.potatoes.intake[participant]) * 180 / 100
+      } else if (vegetable.row == 576) {
+        # Mashed potatoes intake (row 576)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Mashed.potato.intake[participant]) * 180 / 100
+      } else if (vegetable.row == 614) {
+        # Mixed vegetable intake (row 614)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Mixed.vegetable.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 615) {
+        # Vegetable pieces intake (row 615)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Vegetable.pieces.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 623) {
+        # Coleslaw intake (row 623)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Coleslaw.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 667) {
+        # Side salad intake (row 667)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Side.salad.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 379) {
+        # Avocado intake (row 379)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Avocado.intake[participant]) * 160 / 100
+      } else if (vegetable.row == 610) {
+        # Green bean intake (row 610)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Green.bean.intake[participant]) * 80 / 100 * 0.93
+      } else if (vegetable.row == 587) {
+        # Beetroot intake (row 587)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Beetroot.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 505) {
+        # Broccoli intake (row 505)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Broccoli.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 565) {
+        # Butternut squash intake (row 565)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Butternut.squash.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 503) {
+        # Cabbage intake (row 503)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Cabbage.kale.intake[participant]) * 80 / 100 *0.5
+      } else if (vegetable.row == 500) {
+        # Kale intake (row 500)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Cabbage.kale.intake[participant]) * 80 / 100 *0.5
+      } else if (vegetable.row == 592) {
+        # Carrot intake (row 592)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Carrot.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 499) {
+        # Cauliflower intake (row 499)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Cauliflower.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 465) {
+        # Celery intake (row 465)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Celery.intake[participant]) * 26.7 / 100
+      } else if (vegetable.row == 559) {
+        # Courgette intake (row 559)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Courgette.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 467) {
+        # Cucumber intake (row 467)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Cucumber.intake[participant]) * 32 / 100
+      } else if (vegetable.row == 419) {
+        # Garlic intake (row 419)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Garlic.intake[participant]) * 5 / 100
+      } else if (vegetable.row == 522) {
+        # Leek intake (row 522)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Leek.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 702) {
+        # Lettuce intake (row 702)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Lettuce.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 712) {
+        # Mushroom intake (row 712)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Mushroom.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 521) {
+        # Onion intake (row 521)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Onion.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 586) {
+        # Parsnip intake (row 586)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Parsnip.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 397) {
+        # Sweet pepper intake (row 397)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Sweet.pepper.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 513) {
+        # Spinach intake - cooked (row 513)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Spinach.intake[participant]) * 80 / 100 *0.5
+      } else if (vegetable.row == 706) {
+        # Spinach intake - raw (row 706)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Spinach.intake[participant]) * 80 / 100 *0.5
+      } else if (vegetable.row == 507) {
+        # Sprouts intake (row 507)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Sprouts.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 139) {
+        # Sweetcorn intake (row 139)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Sweetcorn.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 571) {
+        # Sweet potato intake (row 571)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Sweet.potato.intake[participant]) * 130 / 100
+      } else if (vegetable.row == 392) {
+        # Fresh tomato intake (row 392)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Fresh.tomato.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 390) {
+        # Tinned tomato intake (row 390)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Tinned.tomato.intake[participant]) * 200 / 100
+      } else if (vegetable.row == 597) {
+        # Turnip intake (row 597)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Turnip.swede.intake[participant]) * 80 / 100 *0.5
+      } else if (vegetable.row == 589) {
+        # Swede intake (row 589)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Turnip.swede.intake[participant]) * 80 / 100 *0.5
+      } else if (vegetable.row == 695) {
+        # Watercress intake (row 695)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Turnip.swede.intake[participant]) * 80 / 100
+      } else if (vegetable.row == 564) {
+        # Other vegetables intake - asparagus (row 564)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Other.vegetables.intake[participant]) * 80 / 100 *0.4
+      } else if (vegetable.row == 394) {
+        # Other vegetables intake - aubergine (row 394)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Other.vegetables.intake[participant]) * 80 / 100 *0.3
+      } else if (vegetable.row == 566) {
+        # Other vegetables intake - squash (row 565)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Other.vegetables.intake[participant]) * 80 / 100 *0.3
+      } else if (vegetable.row == 847) {
+        # Olives Intake - Black (row 847)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Olives.intake[participant]) * 50 / 100 *0.5
+      } else if (vegetable.row == 848) {
+        # Olives Intake - Green (row 848)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[vegetable.row, ]) * p.24h.foods.average$Olives.intake[participant]) * 50 / 100 *0.5
+      }
+    }
+    
+    # Add the resulting summed values for this participant as a new row in the diet.vegetable dataframe
+    # Column names will correspond to the column names in flavonoid_data
+    for (i in seq_along(colnames(flavonoid.columns))) {
+      col.name <- colnames(flavonoid.columns)[i]
+      diet.vegetable[participant, col.name] <- summed.values[i]
+    }
+  }
+  
+  return(diet.vegetable)
+}
+
+# Define the vegetable rows (adjust based on the actual rows you want to sum)
+vegetable.rows <- c(578, 572, 576, 614, 615, 623, 667, 379, 610, 587, 505, 565, 503, 500, 592, 499, 465, 559, 467, 419, 522, 702, 712, 521, 586, 397, 513, 706, 507, 139, 571, 392, 390, 597, 589, 695, 564, 394, 566, 847, 848)
+
+# Call the function to calculate and update the diet.vegetable dataframe, incorporating p.24h.foods.average adjustments
+diet.vegetable <- sum.vegetable.values(vegetable.rows, flavonoid.checkout, diet.vegetable)
+
+write.csv(diet.vegetable, "flavonoid/diet.vegetable.csv", row.names = FALSE)
+
+```
+
+tableone to describe
+```{r}
+# anthocyanins
+diet.vegetable$anthocyanins.vegetable <- diet.vegetable$Cyanidin + diet.vegetable$Delphinidin + diet.vegetable$Malvidin + diet.vegetable$Pelargonidin + diet.vegetable$Petunidin + diet.vegetable$Peonidin
+
+# flavanones 
+diet.vegetable$flavanones.vegetable <- diet.vegetable$Eriodictyol + diet.vegetable$Hesperetin + diet.vegetable$Naringenin
+
+# flavan-3-ols # add for Epigallocatechin Gallocatechin Catechin.3.O.gallate Epicatechin.3.O.gallate Epigallocatechin.3.O.gallate
+diet.vegetable$flavan.3.ols.vegetable <- diet.vegetable$X....Catechin + diet.vegetable$X....Epicatechin + diet.vegetable$X....Epigallocatechin + diet.vegetable$X....Gallocatechin + diet.vegetable$X....Catechin.3.O.gallate + diet.vegetable$X....Epicatechin.3.O.gallate + diet.vegetable$X....Epigallocatechin.3.O.gallate
+
+# flavonols # add for jaceidin, patuletin, spinacetin
+diet.vegetable$flavonols.vegetable <- diet.vegetable$Quercetin + diet.vegetable$Kaempferol + diet.vegetable$Myricetin + diet.vegetable$Isorhamnetin
+
+# flavones
+diet.vegetable$flavones.vegetable <- diet.vegetable$Luteolin + diet.vegetable$Apigenin
+
+# polymers (including proanthocyanidins [excluding monomers], theaflavins, and thearubigins), proanthocyanidins (dimers, trimers, 4–6mers, 7–10mers, polymers, and monomers). 
+diet.vegetable$polymers.vegetable <- diet.vegetable$Theaflavin + diet.vegetable$Thearubigins + diet.vegetable$X02.mers + diet.vegetable$X03.mers + diet.vegetable$X04.06.mers + diet.vegetable$X07.10.mers + diet.vegetable$Polymers...10.mers.
+
+# Proanthocyanidins
+diet.vegetable$proanthocyanidins.vegetable <- diet.vegetable$X....Catechin + diet.vegetable$X....Epicatechin + diet.vegetable$X....Epigallocatechin + diet.vegetable$X....Gallocatechin + diet.vegetable$X....Catechin.3.O.gallate + diet.vegetable$X....Epicatechin.3.O.gallate + diet.vegetable$X....Epigallocatechin.3.O.gallate + diet.vegetable$X02.mers + diet.vegetable$X03.mers + diet.vegetable$X04.06.mers + diet.vegetable$X07.10.mers + diet.vegetable$Polymers...10.mers.
+
+diet.vegetable$total.flavonoid.vegetable <- diet.vegetable$anthocyanins + diet.vegetable$flavanones + diet.vegetable$flavan.3.ols + diet.vegetable$flavonols + diet.vegetable$flavones + diet.vegetable$polymers
+
+diet.vegetable <- merge(diet.vegetable,dietaryscorewithquartile[, c(1,10)], by = "Participant.ID")# Set the 'group'
+# Set the 'group' column as a factor with specified levels: 'psoriasis' and 'non-psoriasis'
+diet.vegetable$group <- factor(diet.vegetable$group, levels = c("psoriasis", "non-psoriasis"))
+
+# Create a descriptive table for the vegetable variables (columns 3 to 217) stratified by the 'group'
+vars <- names(diet.vegetable)[96:103]  # Selecting the variable names from column 3 to 217
+description.vegetable <- CreateTableOne(data = diet.vegetable,
+                                  vars = vars,  # Variable names extracted above
+                                  strata = "group")  # Stratified by 'group' column
+
+# Print the description table without quotes, without spaces, and without printing to the console
+print(description.vegetable, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+description.vegetable
+
+# Save the descriptive table results to a CSV file
+write.csv(print(description.vegetable), "flavonoid/vegetableresult.csv")
+```
+
+
+
+# legumes
+Baked bean intake → Beans, baked, canned, plain or vegetarian -- no flavonoid
+https://assets.kpmg.com/content/dam/kpmg/uk/pdf/2024/07/uk-consumer-pulse-snapshot-july-2024.pdf
+https://www.ons.gov.uk/economy/nationalaccounts/satelliteaccounts/bulletins/consumertrends/previousReleases
+https://link.springer.com/chapter/10.1007/978-3-030-12763-3_2
+Pulses intake 1 serving 150g
+→ Beans, kidney, all types, mature seeds, cooked, boiled, without salt -- row 433 20%
+→ Chickpeas (garbanzo beans, bengal gram), mature seeds, cooked, boiled, without salt -- row 439 30%
+→ Lima beans, Butter beans, mature seeds, cooked, boiled, drained, without salt -- row 458 10%
+→ Lentils, red, split, dried, boiled in unsalted water – row 527 25%
+→ Cannellini beans, dried, cooked in unsalted water – row 544 10%
+→ Beans, pinto,mature seeds, raw – row 541 5%
+Broad bean intake → Broad beans, frozen, boiled in unsalted water -- row 626 1 serving 150g
+Pea intake → Peas, boiled in unsalted water -- row 529 1 serving 80g
+
+```{r}
+rm(diet.snack)
+### Select the variables into a separate dataset for flavonoid evaluation ###
+diet.legume <- data.frame(matrix(ncol = 2, nrow = nrow(demographics)))
+
+# Select Participant ID and group (column 20) from the baseline dataset
+diet.legume[,1:2] <- demographics[, c(1,27)]
+
+# Rename the columns to match the original variable names
+names(diet.legume) <- c("Participant.ID", "group")
+
+# Define a function to sum the legume values, adjust with p.24h.foods.average, and add to diet.legume dataframe
+sum.legume.values <- function(legume.rows, flavonoid.data, diet.legume) {
+  # Specify the column range from column 9 to column 223
+  start.col <- 9
+  end.col <- 101
+  
+  # Extract the data from the specified column range and replace NAs with 0
+  flavonoid.columns <- flavonoid.data[, start.col:end.col]
+  
+  # Loop through each row in diet.legume (each participant)
+  for (participant in seq_len(nrow(diet.legume))) {
+    
+    # Initialize an empty vector to store the sum of each column for the current participant
+    summed.values <- numeric(ncol(flavonoid.columns))
+    
+    # Loop through each specified legume row and add its values to the summed.values vector
+    for (i in seq_along(legume.rows)) {
+      legume.row <- legume.rows[i]
+      
+      # Multiply by the corresponding p.24h.foods.average value and divide by 240 for each participant
+      if (legume.row == 433) {
+        # Pulse intake -Beans, kidney, all types, mature seeds, cooked, boiled, without salt (row 433)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[legume.row, ]) * p.24h.foods.average$Pulses.intake[participant]) * 150 / 100 *0.20
+      } else if (legume.row == 439) {
+        # Pulse intake -Chickpeas (garbanzo beans, bengal gram), mature seeds, cooked, boiled, without salt (row 439)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[legume.row, ]) * p.24h.foods.average$Pulses.intake[participant]) * 150 / 100 *0.30
+      } else if (legume.row == 458) {
+        # Pulse intake -Lima beans, Butter beans, mature seeds, cooked, boiled, drained, without salt (row 458)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[legume.row, ]) * p.24h.foods.average$Pulses.intake[participant]) * 150 / 100 *0.10
+      } else if (legume.row == 527) {
+        # Pulse intake -Lentils, red, split, dried, boiled in unsalted water (row 527)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[legume.row, ]) * p.24h.foods.average$Pulses.intake[participant]) * 150 / 100 *0.25
+      } else if (legume.row == 544) {
+        # Pulse intake -Cannellini beans, dried, cooked in unsalted water (row 544)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[legume.row, ]) * p.24h.foods.average$Pulses.intake[participant]) * 150 / 100 *0.10
+      } else if (legume.row == 541) {
+        # Pulse intake -Beans, pinto, dried, boiled in unsalted water (row 541)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[legume.row, ]) * p.24h.foods.average$Pulses.intake[participant]) * 150 / 100 *0.05
+      } else if (legume.row == 626) {
+        # Broad bean intake (row 626)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[legume.row, ]) * p.24h.foods.average$Broad.bean.intake[participant]) * 150 / 100
+      } else if (legume.row == 529) {
+        # Pea intake (row 529)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[legume.row, ]) * p.24h.foods.average$Pea.intake[participant]) * 80 / 100
+      }
+    }
+    
+    # Add the resulting summed values for this participant as a new row in the diet.legume dataframe
+    # Column names will correspond to the column names in flavonoid_data
+    for (i in seq_along(colnames(flavonoid.columns))) {
+      col.name <- colnames(flavonoid.columns)[i]
+      diet.legume[participant, col.name] <- summed.values[i]
+    }
+  }
+  
+  return(diet.legume)
+}
+
+# Define the legume rows (adjust based on the actual rows you want to sum)
+legume.rows <- c(433, 439, 458, 527, 544, 541, 626, 529)
+
+# Call the function to calculate and update the diet.legume dataframe, incorporating p.24h.foods.average adjustments
+diet.legume <- sum.legume.values(legume.rows, flavonoid.checkout, diet.legume)
+
+write.csv(diet.legume, "flavonoid/diet.legume.csv", row.names = FALSE)
+```
+
+tableone to describe
+```{r}
+# anthocyanins
+diet.legume$anthocyanins.legume <- diet.legume$Cyanidin + diet.legume$Delphinidin + diet.legume$Malvidin + diet.legume$Pelargonidin + diet.legume$Petunidin + diet.legume$Peonidin
+
+# flavanones 
+diet.legume$flavanones.legume <- diet.legume$Eriodictyol + diet.legume$Hesperetin + diet.legume$Naringenin
+
+# flavan-3-ols # add for Epigallocatechin Gallocatechin Catechin.3.O.gallate Epicatechin.3.O.gallate Epigallocatechin.3.O.gallate
+diet.legume$flavan.3.ols.legume <- diet.legume$X....Catechin + diet.legume$X....Epicatechin + diet.legume$X....Epigallocatechin + diet.legume$X....Gallocatechin + diet.legume$X....Catechin.3.O.gallate + diet.legume$X....Epicatechin.3.O.gallate + diet.legume$X....Gallocatechin.3.O.gallate +  diet.legume$X....Epigallocatechin.3.O.gallate
+
+# flavonols # add for jaceidin, patuletin, spinacetin
+diet.legume$flavonols.legume <- diet.legume$Quercetin + diet.legume$Kaempferol + diet.legume$Myricetin + diet.legume$Isorhamnetin
+
+# flavones
+diet.legume$flavones.legume <- diet.legume$Luteolin + diet.legume$Apigenin
+
+# polymers (including proanthocyanidins [excluding monomers], theaflavins, and thearubigins), proanthocyanidins (dimers, trimers, 4–6mers, 7–10mers, polymers, and monomers). 
+diet.legume$polymers.legume <-  diet.legume$X02.mers + diet.legume$X03.mers + diet.legume$X04.06.mers + diet.legume$X07.10.mers + diet.legume$Polymers...10.mers.
+
+# Proanthocyanidins
+diet.legume$proanthocyanidins.legume <- diet.legume$Theaflavin + diet.legume$Thearubigins
+
+# total flavonoid
+diet.legume$total.flavonoid.legume <- diet.legume$anthocyanins.legume + diet.legume$flavanones.legume + diet.legume$flavan.3.ols.legume + diet.legume$flavonols.legume + diet.legume$flavones + diet.legume$polymers.legume + diet.legume$proanthocyanidins.legume
+
+# Set the 'group' column as a factor with specified levels: 'psoriasis' and 'non-psoriasis'
+diet.legume$group <- factor(diet.legume$group, levels = c("psoriasis", "non-psoriasis"))
+
+# Create a descriptive table for the tea variables (columns 3 to 217) stratified by the 'group'
+vars <- names(diet.legume)[96:103]  # Selecting the variable names from column 3 to 217
+description.legume <- CreateTableOne(data = diet.legume,
+                                  vars = vars,  # Variable names extracted above
+                                  strata = "group")  # Stratified by 'group' column
+
+# Print the description table without quotes, without spaces, and without printing to the console
+print(description.legume, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+description.legume
+
+# Save the descriptive table results to a CSV file
+write.csv(print(description.legume), "flavonoid/legumeresult.csv")
+
+```
+
+# nuts
+Salted Peanuts Intake → Peanut, dehulled, roasted -- no flavonoid 
+Unsalted Peanuts Intake → Peanut, dehulled, roasted -- no flavonoid 
+https://inc.nutfruit.org/wp-content/uploads/2023/05/Statistical-Yearbook-2022-2023.pdf
+Salted Nuts Intake / Unsalted Nuts Intake 1 handful 30g
+•	Almonds, dry roasted, without salt added 26.59% -- row 791
+•	Brazil Nuts 4.89% -- no flavonoid
+•	Nuts, cashew nuts, dry roasted, without salt added 30.17% -- row 794
+•	Hazelnuts 12.40% -- row 796
+•	Macadamia 0.50% -- row 811
+•	Pecan 3.58% -- row 805
+•	Pine nuts 1.38% -- no flavonoid
+•	Nuts, pistachio nuts, dry roasted, without salt added 6.05% -- row 799
+•	Walnuts 14.44% -- row 809
+
+
+Seeds Intake → Mixed seeds -- row 840 1 handful 20g
+```{r}
+rm(diet.legume)
+### Select the variables into a separate dataset for flavonoid evaluation ###
+diet.nut <- data.frame(matrix(ncol = 2, nrow = nrow(demographics)))
+
+# Select Participant ID and group (column 20) from the baseline dataset
+diet.nut[,1:2] <- demographics[, c(1,27)]
+
+# Rename the columns to match the original variable names
+names(diet.nut) <- c("Participant.ID", "group")
+
+# Define a function to sum the nut values, adjust with p.24h.foods.average, and add to diet.nut dataframe
+sum.nut.values <- function(nut.rows, flavonoid.data, diet.nut) {
+  # Specify the column range from column 9 to column 223
+  start.col <- 9
+  end.col <- 101
+  
+  # Extract the data from the specified column range and replace NAs with 0
+  flavonoid.columns <- flavonoid.data[, start.col:end.col]
+  
+  # Loop through each row in diet.nut (each participant)
+  for (participant in seq_len(nrow(diet.nut))) {
+    
+    # Initialize an empty vector to store the sum of each column for the current participant
+    summed.values <- numeric(ncol(flavonoid.columns))
+    
+    # Loop through each specified nut row and add its values to the summed.values vector
+    for (i in seq_along(nut.rows)) {
+      nut.row <- nut.rows[i]
+      
+      # Multiply by the corresponding p.24h.foods.average value and divide by 240 for each participant
+      if (nut.row == 791) {
+        # (UN)Salted Nuts Intake -- Almonds (row 791)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Salted.nuts.intake[participant]) * 30 / 100 *0.2659 + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Unsalted.nuts.intake[participant]) * 30 / 100 *0.2659
+      } else if (nut.row == 794) {
+        # (UN)Salted Nuts Intake -- Cashew (row 794)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Salted.nuts.intake[participant]) * 30 / 100 *0.3017 + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Unsalted.nuts.intake[participant]) * 30 / 100 *0.3017
+      } else if (nut.row == 796) {
+        # (UN)Salted Nuts Intake -- Hazelnuts (row 796)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Salted.nuts.intake[participant]) * 30 / 100 *0.1240 + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Unsalted.nuts.intake[participant]) * 30 / 100 *0.1240
+      } else if (nut.row == 811) {
+        # (UN)Salted Nuts Intake --	Macadamia (row 811)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Salted.nuts.intake[participant]) * 30 / 100 *0.005 + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Unsalted.nuts.intake[participant]) * 30 / 100 *0.005
+      } else if (nut.row == 805) {
+        # (UN)Salted Nuts Intake --	Pecan (row 805)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Salted.nuts.intake[participant]) * 30 / 100 *0.0358 + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Unsalted.nuts.intake[participant]) * 30 / 100 *0.0358
+      } else if (nut.row == 799) {
+        # (UN)Salted Nuts Intake --	Pistachios (row 799)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Salted.nuts.intake[participant]) * 30 / 100 *0.0605 + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Unsalted.nuts.intake[participant]) * 30 / 100 *0.0605
+      } else if (nut.row == 809) {
+        # (UN)Salted Nuts Intake --	Walnuts (row 809)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Salted.nuts.intake[participant]) * 30 / 100 *0.1444 + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Unsalted.nuts.intake[participant]) * 30 / 100 *0.1444
+      } else if (nut.row == 840) {
+        # Seeds Intake (row 840)
+        summed.values <- summed.values + (as.numeric(flavonoid.columns[nut.row, ]) * p.24h.foods.average$Seeds.intake[participant]) * 20 / 100
+      }
+    }
+    
+    # Add the resulting summed values for this participant as a new row in the diet.nut dataframe
+    # Column names will correspond to the column names in flavonoid_data
+    for (i in seq_along(colnames(flavonoid.columns))) {
+      col.name <- colnames(flavonoid.columns)[i]
+      diet.nut[participant, col.name] <- summed.values[i]
+    }
+  }
+  
+  return(diet.nut)
+}
+
+# Define the nut rows (adjust based on the actual rows you want to sum)
+nut.rows <- c(791, 794, 796, 811, 805, 799, 809, 840)
+
+# Call the function to calculate and update the diet.nut dataframe, incorporating p.24h.foods.average adjustments
+diet.nut <- sum.nut.values(nut.rows, flavonoid.checkout, diet.nut)
+
+write.csv(diet.nut, "flavonoid/diet.nut.csv", row.names = FALSE)
+
+```
+
+tableone to describe
+```{r}
+# anthocyanins
+diet.nut$anthocyanins.nut <- diet.nut$Cyanidin + diet.nut$Delphinidin + diet.nut$Malvidin + diet.nut$Pelargonidin + diet.nut$Petunidin + diet.nut$Peonidin
+
+# flavanones 
+diet.nut$flavanones.nut <- diet.nut$Eriodictyol + diet.nut$Hesperetin + diet.nut$Naringenin
+
+# flavan-3-ols # add for Epigallocatechin Gallocatechin Catechin.3.O.gallate Epicatechin.3.O.gallate Epigallocatechin.3.O.gallate
+diet.nut$flavan.3.ols.nut <- diet.nut$X....Catechin + diet.nut$X....Epicatechin + diet.nut$X....Epigallocatechin + diet.nut$X....Gallocatechin + diet.nut$X....Catechin.3.O.gallate + diet.nut$X....Epicatechin.3.O.gallate + diet.nut$X....Gallocatechin.3.O.gallate +  diet.nut$X....Epigallocatechin.3.O.gallate
+
+# flavonols # add for jaceidin, patuletin, spinacetin
+diet.nut$flavonols.nut <- diet.nut$Quercetin + diet.nut$Kaempferol + diet.nut$Myricetin + diet.nut$Isorhamnetin
+
+# flavones
+diet.nut$flavones.nut <- diet.nut$Luteolin + diet.nut$Apigenin
+
+# polymers (including proanthocyanidins [excluding monomers], theaflavins, and thearubigins), proanthocyanidins (dimers, trimers, 4–6mers, 7–10mers, polymers, and monomers). 
+diet.nut$polymers.nut <-  diet.nut$X02.mers + diet.nut$X03.mers + diet.nut$X04.06.mers + diet.nut$X07.10.mers + diet.nut$Polymers...10.mers.
+
+# Proanthocyanidins
+diet.nut$proanthocyanidins.nut <- diet.nut$Theaflavin + diet.nut$Thearubigins
+
+# total flavonoid
+diet.nut$total.flavonoid.nut <- diet.nut$anthocyanins.nut + diet.nut$flavanones.nut + diet.nut$flavan.3.ols.nut + diet.nut$flavonols.nut + diet.nut$flavones + diet.nut$polymers.nut + diet.nut$proanthocyanidins.nut
+
+# Set the 'group' column as a factor with specified levels: 'psoriasis' and 'non-psoriasis'
+diet.nut$group <- factor(diet.nut$group, levels = c("psoriasis", "non-psoriasis"))
+
+# Create a descriptive table for the tea variables (columns 3 to 217) stratified by the 'group'
+vars <- names(diet.nut)[96:103]  # Selecting the variable names from column 3 to 217
+description.nut <- CreateTableOne(data = diet.nut,
+                                  vars = vars,  # Variable names extracted above
+                                  strata = "group")  # Stratified by 'group' column
+
+# Print the description table without quotes, without spaces, and without printing to the console
+print(description.nut, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+description.nut
+
+# Save the descriptive table results to a CSV file
+write.csv(print(description.nut), "flavonoid/nutresult.csv")
+```
+
+
+
+# final polyphenol
+```{r}
+diet.tea <- read.csv("flavonoid/diet.tea.csv")
+#diet.coffee <- read.csv("flavonoid/diet.coffee.csv")
+diet.chocolate <- read.csv("flavonoid/diet.chocolate.csv")
+diet.alcohol <- read.csv("flavonoid/diet.alcohol.csv")
+diet.juice <- read.csv("flavonoid/diet.juice.csv")
+diet.cereal <- read.csv("flavonoid/diet.cereal.csv")
+#diet.vegan <- read.csv("flavonoid/diet.vegan.csv")
+diet.fruit <- read.csv("flavonoid/diet.fruit.csv")
+diet.vegetable <- read.csv("flavonoid/diet.vegetable.csv")
+diet.legume <- read.csv("flavonoid/diet.legume.csv")
+#diet.snack <- read.csv("flavonoid/diet.snack.csv")
+diet.nut <- read.csv("flavonoid/diet.nut.csv")
+#diet.k <- read.csv("flavonoid/necessary.csv")
+
+# Create a new dataset by keeping the first two columns from one of the datasets
+final.polyphenol <- diet.tea  # Copy the structure of dataset1
+
+# Keep the first two columns as they are from 'dataset1'
+final.polyphenol[, 1:2] <- diet.tea[, 1:2]
+
+diet.tea[, 3:95] <- replace(diet.tea[, 3:95], is.na(diet.tea[, 3:95]), 0)
+diet.chocolate[, 3:95] <- replace(diet.chocolate[, 3:95], is.na(diet.chocolate[, 3:95]), 0)
+diet.alcohol[, 3:95] <- replace(diet.alcohol[, 3:95], is.na(diet.alcohol[, 3:95]), 0)
+diet.juice[, 3:95] <- replace(diet.juice[, 3:95], is.na(diet.juice[, 3:95]), 0)
+diet.fruit[, 3:95] <- replace(diet.fruit[, 3:95], is.na(diet.fruit[, 3:95]), 0)
+diet.vegetable[, 3:95] <- replace(diet.vegetable[, 3:95], is.na(diet.vegetable[, 3:95]), 0)
+#diet.snack[, 3:95] <- replace(diet.snack[, 3:95], is.na(diet.snack[, 3:95]), 0)
+#diet.coffee[, 3:95] <- replace(diet.coffee[, 3:95], is.na(diet.coffee[, 3:95]), 0)
+diet.cereal[, 3:95] <- replace(diet.cereal[, 3:95], is.na(diet.cereal[, 3:95]), 0)
+#diet.vegan[, 3:95] <- replace(diet.vegan[, 3:95], is.na(diet.vegan[, 3:95]), 0)
+diet.legume[, 3:95] <- replace(diet.legume[, 3:95], is.na(diet.legume[, 3:95]), 0)
+diet.nut[, 3:95] <- replace(diet.nut[, 3:95], is.na(diet.nut[, 3:95]), 0)
+  
+# Add the values of corresponding cells in columns 3 to 217 of both datasets
+final.polyphenol[, 3:95] <- diet.tea[, 3:95] + 
+                             diet.chocolate[, 3:95] + 
+                             diet.alcohol[, 3:95] + 
+                             diet.juice[, 3:95] + 
+                             diet.fruit[, 3:95] + 
+                             diet.vegetable[, 3:95] #+ 
+                             #diet.snack[, 3:95] +
+#diet.coffee[, 3:95] + 
+diet.cereal[, 3:95] + 
+#diet.vegan[, 3:95] + 
+diet.legume[, 3:95] +
+diet.nut[, 3:95]
+
+#final.polyphenol[, 3:95] <- diet.k[, 3:95]
+
+# The result is stored in 'summed_dataset', with columns 3 to 217 containing the summed values
+write.csv(final.polyphenol, "flavonoid/final.polyphenol.csv", row.names = FALSE)
+```
+
+tableone to describe
+```{r}
+# anthocyanins
+final.polyphenol$anthocyanins1 <- final.polyphenol$Cyanidin + final.polyphenol$Delphinidin + final.polyphenol$Malvidin + final.polyphenol$Pelargonidin + final.polyphenol$Petunidin + final.polyphenol$Peonidin
+
+# flavanones 
+final.polyphenol$flavanones1 <- final.polyphenol$Eriodictyol + final.polyphenol$Hesperetin + final.polyphenol$Naringenin
+
+# flavan-3-ols # add for Epigallocatechin Gallocatechin Catechin.3.O.gallate Epicatechin.3.O.gallate Epigallocatechin.3.O.gallate
+final.polyphenol$flavan.3.ols1 <- final.polyphenol$X....Catechin + final.polyphenol$X....Epicatechin 
+#+ final.polyphenol$X....Epigallocatechin + final.polyphenol$X....Gallocatechin + final.polyphenol$X....Catechin.3.O.gallate + final.polyphenol$X....Epicatechin.3.O.gallate + final.polyphenol$X....Gallocatechin.3.O.gallate +  final.polyphenol$X....Epigallocatechin.3.O.gallate
+
+
+# flavonols # add for jaceidin, patuletin, spinacetin
+final.polyphenol$flavonols1 <- final.polyphenol$Quercetin + final.polyphenol$Kaempferol + final.polyphenol$Myricetin + final.polyphenol$Isorhamnetin
+
+# flavones
+final.polyphenol$flavones1 <- final.polyphenol$Luteolin + final.polyphenol$Apigenin
+
+# polymers (including proanthocyanidins [excluding monomers], theaflavins, and thearubigins), proanthocyanidins (dimers, trimers, 4–6mers, 7–10mers, polymers, and monomers). 
+final.polyphenol$polymers1 <-  final.polyphenol$X02.mers + final.polyphenol$X03.mers + final.polyphenol$X04.06.mers + final.polyphenol$X07.10.mers + final.polyphenol$Polymers...10.mers.
+
+# Proanthocyanidins
+final.polyphenol$proanthocyanidins1 <- final.polyphenol$Theaflavin + final.polyphenol$Thearubigins
+
+# total flavonoid
+final.polyphenol$total.flavonoid1 <- final.polyphenol$anthocyanins1 + final.polyphenol$flavanones1 + final.polyphenol$flavan.3.ols1 + final.polyphenol$flavonols1 + final.polyphenol$flavones1 + final.polyphenol$polymers1 + final.polyphenol$proanthocyanidins1
+
+# Set the 'group' column as a factor with specified levels: 'psoriasis' and 'non-psoriasis'
+final.polyphenol$group <- factor(final.polyphenol$group, levels = c("psoriasis", "non-psoriasis"))
+
+# Create a descriptive table for the tea variables (columns 3 to 217) stratified by the 'group'
+vars <- names(final.polyphenol)[96:103]  # Selecting the variable names from column 3 to 217
+description.polyphenol <- CreateTableOne(data = final.polyphenol,
+                                  vars = vars,  # Variable names extracted above
+                                  strata = "group")  # Stratified by 'group' column
+
+# Print the description table without quotes, without spaces, and without printing to the console
+print(description.polyphenol, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+description.polyphenol
+
+# Save the descriptive table results to a CSV file
+write.csv(print(description.polyphenol), "flavonoid/polyphenolresult.csv")
+```
+
+# filter the items and calculate flavonoid and polyphenol
+anthocyanins (cyanidin, delphinidin, malvidin, pelargonidin, petunidin, and peonidin),
+flavanones (eriodictyol, hesperetin, and naringenin), 
+flavan-3-ols (catechins and epicatechins), # Epigallocatechin Gallocatechin
+flavonols (quercetin, kaempferol, myricetin, and isohamnetin), 
+flavones (luteolin and apigenin), 
+polymers (including proanthocyanidins [excluding monomers], theaflavins, and thearubigins), proanthocyanidins (dimers, trimers, 4–6mers, 7–10mers, polymers, and monomers). 
+Total flavonoid intakes were calculated by summing the 6 component subclasses (flavanones, anthocyanins, flavan-3-ols, flavonols, flavones, and polymers).
+phenolic acid: Gallic Acid, Protocatechuic Acid, Vanillic Acid, Syringic Acid, Ellagic Acid, Caffeic Acid, p-Coumaric Acid, Ferulic Acid, Chlorogenic Acids, Sinapic Acid, and Rosmarinic Acid. 
+stilbenes: Resveratrol
+Lignans: Matairesinol, Secoisolariciresinol
+
+```{r}
+### Select the variables into a separate dataset for flavonoid evaluation ###
+selected.polyphenol <- data.frame(matrix(ncol = 2, nrow = nrow(diet.tea)))
+
+# Select Participant ID and group (column 20) from the baseline dataset
+selected.polyphenol[,1:2] <- diet.tea[, c(1,2)]
+
+# Rename the columns to match the original variable names
+names(selected.polyphenol) <- c("Participant.ID", "group")
+
+
+# anthocyanins
+selected.polyphenol$anthocyanins <- final.polyphenol$anthocyanins1
+
+# flavanones 
+selected.polyphenol$flavanones <- final.polyphenol$flavanones1
+
+# flavonols # add for jaceidin, patuletin, spinacetin
+selected.polyphenol$flavonols <- final.polyphenol$flavonols1
+
+# flavones
+selected.polyphenol$flavones <- final.polyphenol$flavones1
+
+# flavan-3-ols # add for Epigallocatechin Gallocatechin Catechin.3.O.gallate Epicatechin.3.O.gallate Epigallocatechin.3.O.gallate
+selected.polyphenol$flavan.3.ols <- final.polyphenol$flavan.3.ols1 + final.polyphenol$polymers1 + final.polyphenol$proanthocyanidins1
+
+
+# total flavonoid
+selected.polyphenol$total.flavonoid <- selected.polyphenol$anthocyanins + selected.polyphenol$flavanones + selected.polyphenol$flavan.3.ols + selected.polyphenol$flavonols + selected.polyphenol$flavones
+
+
+# The result is stored in 'summed_dataset', with columns 3 to 217 containing the summed values
+write.csv(selected.polyphenol, "flavonoid/selected.polyphenol.csv", row.names = FALSE)
+```
+
+tableone to describe
+```{r}
+selected.polyphenol <- read.csv("flavonoid/selected.polyphenol.csv")
+#selected.polyphenol <- selected.polyphenol %>% filter(Participant.ID %in% polyphenolwithst$Participant.ID)
+# Set the 'group' column as a factor with specified levels: 'psoriasis' and 'non-psoriasis'
+selected.polyphenol$group <- factor(selected.polyphenol$group, levels = c("psoriasis", "non-psoriasis"))
+
+# Create a descriptive table for the fruit variables (columns 3 to 217) stratified by the 'group'
+vars <- names(selected.polyphenol)[3:8]  # Selecting the variable names from column 3 to 217
+description.polyphenol <- CreateTableOne(data = selected.polyphenol,
+                                  vars = vars,  # Variable names extracted above
+                                  strata = "group")  # Stratified by 'group' column
+
+# Print the description table without quotes, without spaces, and without printing to the console
+print(description.polyphenol, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+description.polyphenol
+
+# Save the descriptive table results to a CSV file
+write.csv(print(description.polyphenol), "flavonoid/selectedpolyphenolresult.csv")
+```
+
+```{r}
+# Step 1: 准确指定 flavonoid 子类列名
+flavonoid_columns <- names(diet.nut)[96:103]  # 只需从任意一个 dataset 取名字即可
+
+# Step 2: 重新构建数据源列表，只保留需要的列（ID + flavonoids）
+source_list <- list(
+  nut = diet.nut[, c("Participant.ID", flavonoid_columns)],
+  tea = diet.tea[, c("Participant.ID", flavonoid_columns)],
+  chocolate = diet.chocolate[, c("Participant.ID", flavonoid_columns)],
+  alcohol = diet.alcohol[, c("Participant.ID", flavonoid_columns)],
+  juice = diet.juice[, c("Participant.ID", flavonoid_columns)],
+  cereal = diet.cereal[, c("Participant.ID", flavonoid_columns)],
+  fruit = diet.fruit[, c("Participant.ID", flavonoid_columns)],
+  vegetable = diet.vegetable[, c("Participant.ID", flavonoid_columns)],
+  legume = diet.legume[, c("Participant.ID", flavonoid_columns)]
+)
+
+# Step 3: 提取 quartile 信息
+quartile_info <- final.polyphenol[, c("Participant.ID", "quartile_total.flavonoid")]
+
+# Step 4: 初始化
+final_long_data <- data.frame()
+
+# Step 5: 循环每个食物来源，合并 quartile，并转成长格式
+for (source_name in names(source_list)) {
+  df <- source_list[[source_name]]
+  
+  # 合并 quartile
+  df <- merge(df, quartile_info, by = "Participant.ID")
+  
+  # 添加食物来源标签
+  df$Source <- source_name
+  
+  # 长格式转换
+  temp_long <- tidyr::pivot_longer(df,
+                                   cols = all_of(flavonoid_columns),
+                                   names_to = "SubType",
+                                   values_to = "Amount")
+  
+  # 合并进总表
+  final_long_data <- rbind(final_long_data, temp_long)
+}
+
+q3_q4_diff <- final_long_data %>%
+  group_by(Source, SubType, quartile_total.flavonoid) %>%
+  summarise(mean = mean(Amount, na.rm = TRUE), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = quartile_total.flavonoid,
+                     values_from = mean,
+                     names_prefix = "Q") %>%
+  mutate(diff = Q4 - Q3) %>%
+  arrange(desc(diff))
+
+write.csv(q3_q4_diff, "q3_q4_diff.csv")
+```
+
+# prepare for survival time and event 
+
+```{r}
+endtime <- read.csv("C:/Users/14999/OneDrive - King's College London/genetics/check the name of different sets.csv")
+# Step 1: Convert ISO datetime strings to Date format (keep only the date)
+endtime <- endtime %>%
+  mutate(across(starts_with("When.diet.questionnaire.completed"),
+                ~ as.Date(.x, format = "%Y-%m-%dT%H:%M:%OSZ")))
+
+# Step 2: Calculate the latest (most recent) non-NA date across the 5 time points
+endtime$Latest_Diet_Date <- apply(endtime[, c("When.diet.questionnaire.completed...Instance.0",
+                                              "When.diet.questionnaire.completed...Instance.1",
+                                              "When.diet.questionnaire.completed...Instance.2",
+                                              "When.diet.questionnaire.completed...Instance.3",
+                                              "When.diet.questionnaire.completed...Instance.4")],
+                                   1, function(row) {
+                                     if (all(is.na(row) | row == "")) {
+                                       return(NA)
+                                     } else {
+                                       return(max(row, na.rm = TRUE))
+                                     }
+                                   })
+endtime$Date.of.death...Instance.0 <- as.Date(endtime$Date.of.death...Instance.0, format = "%d/%m/%Y")
+
+polyphenol <- read.csv("C:/Users/14999/OneDrive - King's College London/genetics/flavonoid/selected.polyphenol.csv")
+#polyphenol <- polyphenol[, c(1,2,3,6,7,24,42,65,76,90,104,111,158,213)]
+
+# Convert the 'group' column to a factor with specified levels
+polyphenol$group <- factor(polyphenol$group, levels = c("non-psoriasis", "psoriasis"))
+
+# Add a new column 'event' indicating the presence of psoriasis (1) or not (0)
+polyphenol <- polyphenol %>%
+  mutate(event = ifelse(group == "psoriasis", 1, 0))
+
+# Load data related to psoriasis incidence and format date columns
+# Load data related to psoriasis incidence and format date columns
+filtered.incidence <- read.csv("basic files/4907incidence.csv")
+filtered.incidence <- merge(filtered.incidence, endtime, by = "Participant.ID")
+filtered.incidence$Date.L40.first.reported..psoriasis. <- as.Date(filtered.incidence$Date.L40.first.reported..psoriasis., format = "%Y-%m-%d")
+
+# Calculate survival time from the date of attending assessment centre to the first reported psoriasis date
+filtered.incidence <- filtered.incidence %>%
+  mutate(
+    end_time = pmin(Date.L40.first.reported..psoriasis., Date.of.death...Instance.0, na.rm = TRUE),
+    survival.time = interval(Latest_Diet_Date, end_time) / years(1)
+  ) %>%
+  filter(survival.time >  0)
+
+# Load control group data and merge with non-psoriasis baseline characteristics
+filtered.control <- read.csv("basic files/484895control.csv")
+filtered.control <- merge(filtered.control, endtime, by = "Participant.ID")
+
+
+# Calculate survival time for control participants from the date of attending assessment centre
+filtered.control <- filtered.control %>%
+  mutate(
+    end_time = pmin(as.Date("2023-10-12"), Date.of.death...Instance.0, na.rm = TRUE),
+    survival.time = interval(Latest_Diet_Date, end_time) / years(1)
+  ) %>%
+  filter(survival.time > 0)
+
+# Combine survival times from both incidence and control groups into one dataset
+survivaltime <- rbind(filtered.incidence[,c(1,23)], filtered.control[,c(1,22)])
+
+# Merge dietary scores dataset with survival times based on 'Participant.ID'
+polyphenolwithst <- merge(polyphenol, survivaltime, by = "Participant.ID")
+
+# Display the column names of the final dataset
+names(polyphenolwithst)
+
+#polyphenolwithst <- polyphenolwithst %>% filter(Participant.ID %in% participants.recall.over2$Participant.ID)
+
+table(polyphenolwithst$group)
+participants.recall.over2 <- read.csv("24hr/participants.recall.over2.csv")
+
+#polyphenolwithst <- polyphenolwithst %>% filter(Participant.ID %in% participants.recall.over2$Participant.ID)
+
+```
+
+# prepare for necessary covariates
+```{r}
+# Load demographic data for participants with psoriasis
+p.baseline <- read.csv("basic files/demographics.csv") %>%
+  filter(Participant.ID %in% polyphenolwithst$Participant.ID)
+p.baseline <- p.baseline[, c(1,2,3, 6, 16)]
+
+white <- c("White", "British", "Irish", "Any other white background")
+mixed <- c("White and Black Caribbean", "White and Black African", "White and Asian", "Mixed", "Any other mixed background")
+asian <- c("Indian", "Chinese", "Pakistani", "Bangladeshi", "Asian or Asian British", "Any other Asian background")
+black <- c("Caribbean", "African", "Black or Black British", "Any other Black background")
+other.ethnic.group <- "Other ethnic group"
+missing <- c("Do not know", "Prefer not to answer", "")
+
+p.baseline <- p.baseline %>%
+  mutate(
+    Ethnic.background = case_when(
+      p.baseline$Ethnic.background...Instance.0 %in% white ~ "White",
+      p.baseline$Ethnic.background...Instance.0 %in% mixed ~ "Mixed",
+      p.baseline$Ethnic.background...Instance.0 %in% asian ~ "Asian",
+      p.baseline$Ethnic.background...Instance.0 %in% black ~ "Black",
+      p.baseline$Ethnic.background...Instance.0 %in% other.ethnic.group ~ "Other ethnic group",
+      p.baseline$Ethnic.background...Instance.0 %in% missing ~ "Missing"
+  ))
+
+education <- read.csv("basic files/education.csv") %>%
+  filter(Participant.ID %in% polyphenolwithst$Participant.ID)
+
+qual_order <- c(
+  "College or University degree",
+  "Other professional qualifications eg: nursing, teaching",
+  "A levels/AS levels or equivalent",
+  "NVQ or HND or HNC or equivalent",
+  "CSEs or equivalent",
+  "O levels/GCSEs or equivalent",
+  "Prefer not to answer",
+  "None of the above",
+  NA
+)
+
+# 处理数据：按优先级保留每个ID的最高学历
+education_top <- education %>%
+  mutate(priority = match(Qualifications, qual_order)) %>%
+  group_by(Participant.ID) %>%
+  slice_min(priority, with_ties = FALSE) %>%
+  ungroup()
+
+
+#Low: CSEs or equivalent, O levels/GCSEs or equivalent; 
+low <- c("CSEs or equivalent", "O levels/GCSEs or equivalent")
+#Medium: A levels/AS levels or equivalent, NVQ or HND or HNC or equivalent; 
+medium <- c("A levels/AS levels or equivalent", "NVQ or HND or HNC or equivalent")
+#High: College or University degree, other professional qualifications eg: nursing, teaching; 
+high <- c("College or University degree", "Other professional qualifications eg: nursing, teaching")
+#unknown/missing/prefer not to say
+missing <- c(NA, "None of the above", "Prefer not to answer")
+education_top <- education_top %>%
+  mutate(
+    Qualification = case_when(
+      education_top$Qualifications %in% low ~ "low",
+      education_top$Qualifications %in% medium ~ "medium",
+      education_top$Qualifications %in% high ~ "high",
+      education_top$Qualifications %in% missing ~ "missing"
+  ))
+p.baseline <- merge(p.baseline, education_top[, c(1,5)], by = "Participant.ID")
+
+# Load lifestyle data for participants with and without psoriasis
+p.lifestyle <- read.csv("basic files/healthandlifestyle.csv") %>%
+  filter(Participant.ID %in% polyphenolwithst$Participant.ID)
+p.lifestyle <- p.lifestyle[, c(1, 12, 71:72, 85, 87, 88)]
+
+# Rename the BMI column to a simpler name
+names(p.lifestyle)[names(p.lifestyle) == "Body.mass.index..BMI....Instance.0.participant...p21001_i0."] <- "BMI"
+
+covariatebasic <- merge(p.baseline, p.lifestyle, by = "Participant.ID")
+
+p.comorbid <- read.csv("basic files/comorbidity.number.csv")%>%
+  filter(Participant.ID %in% polyphenolwithst$Participant.ID)
+AQI <- read.csv("basic files/AQI.csv")%>%
+  filter(Participant.ID %in% polyphenolwithst$Participant.ID)
+PRS <- read.csv("basic files/PRS.csv") %>%
+  filter(Participant.ID %in% polyphenolwithst$Participant.ID)
+
+need <- merge(p.comorbid[, c(1, 155, 156)], AQI[, c(1,9)], by = "Participant.ID")
+covariate <- merge(covariatebasic, need, by = "Participant.ID")
+covariateothers <- merge(endtime[, c(3,9)], PRS[, c(1:15)], by = "Participant.ID")
+covariate <- merge(covariate, covariateothers, by = "Participant.ID")
+
+p.24h.foods.average <- read.csv("24hr/average 24hrecall individual foods.csv") %>% 
+  filter(Participant.ID %in% polyphenolwithst$Participant.ID)
+p.24h.nutrients.average <- read.csv("24hr/average 24hrecall nutrients.csv") %>% 
+  filter(Participant.ID %in% polyphenolwithst$Participant.ID)
+PDIscore <- read.csv("diet indices/PDIscore.csv")
+nutrient <- merge(p.24h.nutrients.average[, c(1, 2, 14, 17, 20, 44)], PDIscore[,c(21, 18, 19)], by = "Participant.ID")
+
+p.24h.foods.average$SSB <- rowSums(p.24h.foods.average[c(4, 5, 22, 24)], na.rm = TRUE)
+p.24h.foods.average$cheese <- rowSums(p.24h.foods.average[c(106:116)], na.rm = TRUE)
+p.24h.foods.average$egg <- rowSums(p.24h.foods.average[c(117:121)], na.rm = TRUE)
+p.24h.foods.average$meat <- rowSums(p.24h.foods.average[c(122:125, 128:131)], na.rm = TRUE)
+p.24h.foods.average$fish <- rowSums(p.24h.foods.average[c(132:140)], na.rm = TRUE)
+p.24h.foods.average$wholegrain <- rowSums(p.24h.foods.average[c(33:35, 38:39, 48, 99, 101, 104)], na.rm = TRUE)
+p.24h.foods.average$coffee <- rowSums(p.24h.foods.average[c(11:15)], na.rm = TRUE)
+p.24h.foods.average$tea  <- rowSums(p.24h.foods.average[c(16:20)], na.rm = TRUE)
+p.24h.foods.average$fruit.juice <- rowSums(p.24h.foods.average[c(6:9)], na.rm = TRUE)
+p.24h.foods.average$fruit  <- rowSums(p.24h.foods.average[c(183:201)], na.rm = TRUE)
+p.24h.foods.average$chocolate  <- rowSums(p.24h.foods.average[, c("Chocolate.bar.intake",
+                                                 "White.chocolate.intake",
+                                                 "Milk.chocolate.intake",
+                                                 "Dark.chocolate.intake",
+                                                 "Chocolate.covered.raisin.intake",
+                                                 "Chocolate.sweet.intake",
+                                                 "Chocolate.covered.biscuits.intake",
+                                                 "Chocolate.biscuits.intake")], na.rm = TRUE)
+p.24h.foods.average$vegetable  <- rowSums(p.24h.foods.average[c(150:154, 156:171, 173:182)], na.rm = TRUE)
+p.24h.foods.average$wine  <- rowSums(p.24h.foods.average[c(26:31)], na.rm = TRUE)
+p.24h.foods.average$nut  <- rowSums(p.24h.foods.average[c(85:89)], na.rm = TRUE)
+p.24h.foods.average$legume  <- rowSums(p.24h.foods.average[c(145:146, 155, 172)], na.rm = TRUE)
+
+#p.24h.foods.average$snk <- rowSums(p.24h.foods.average[c(50:71, 78:79, 82:84, 90:92, 94)], na.rm = TRUE)
+
+covariate <- merge(covariate, nutrient, by = "Participant.ID")
+covariate <- merge(covariate, p.24h.foods.average[, c(1, 202:216)], by = "Participant.ID")
+polyphenolwithhealth <- merge(polyphenolwithst, covariate, by = "Participant.ID")
+
+# Convert IPAQ activity group to a factor with specified levels, excluding blank entries
+polyphenolwithhealth$IPAQ.activity.group...Instance.0 <- factor(polyphenolwithhealth$IPAQ.activity.group...Instance.0, levels = c("low", "moderate", "high", ""))
+
+# Step 1: Replace "" and "Prefer not to answer" with "Missing"
+polyphenolwithhealth$Smoking.status...Instance.0[
+  polyphenolwithhealth$Smoking.status...Instance.0 %in% c("", "Prefer not to answer")
+] <- "Missing"
+
+# Step 2: Set factor levels, including "Missing"
+polyphenolwithhealth$Smoking.status...Instance.0 <- factor(
+  polyphenolwithhealth$Smoking.status...Instance.0,
+  levels = c("Never", "Previous", "Current", "Missing")
+)
+
+# Step 1: Replace "" and "Prefer not to answer" with "Missing"
+polyphenolwithhealth$Alcohol.drinker.status...Instance.0[
+  polyphenolwithhealth$Alcohol.drinker.status...Instance.0 %in% c("", "Prefer not to answer")
+] <- "Missing"
+
+# Step 2: Set factor levels, including "Missing"
+polyphenolwithhealth$Alcohol.drinker.status...Instance.0 <- factor(
+  polyphenolwithhealth$Alcohol.drinker.status...Instance.0,
+  levels = c("Never", "Previous", "Current", "Missing")
+)
+
+# Step 1: Replace "" and "Prefer not to answer" with "Missing"
+polyphenolwithhealth$Alcohol.intake.frequency....Instance.0[
+  polyphenolwithhealth$Alcohol.intake.frequency....Instance.0 %in% c("", "Prefer not to answer")
+] <- "Missing"
+
+# Step 2: Set factor levels, including "Missing"
+polyphenolwithhealth$Alcohol.drinker.status...Instance.0 <- factor(polyphenolwithhealth$Alcohol.intake.frequency....Instance.0, levels = c("Never", "Special occasions only", "One to three times a month", "Once or twice a week", "Three or four times a week", "Daily or almost daily", "Missing"))
+
+
+# Convert MET minutes
+polyphenolwithhealth$Summed.MET.minutes.per.week.for.all.activity...Instance.0 <- 
+  as.numeric(polyphenolwithhealth$Summed.MET.minutes.per.week.for.all.activity...Instance.0)
+
+# 计算唯一分位点
+valid_MET <- polyphenolwithhealth$Summed.MET.minutes.per.week.for.all.activity...Instance.0
+quantile_breaks <- unique(quantile(valid_MET, probs = seq(0, 1, 0.2), na.rm = TRUE))
+
+# 使用 cut() 划分分组（对非缺失值）
+MET_quintiles <- cut(
+  valid_MET,
+  breaks = quantile_breaks,
+  include.lowest = TRUE,
+  labels = paste0("Q", 1:5)
+)
+
+# 将 NA 值替换为 "Missing"
+MET_quintiles <- as.character(MET_quintiles)  # 先转为字符，才能加入 "Missing"
+MET_quintiles[is.na(MET_quintiles)] <- "Missing"
+polyphenolwithhealth$MET.Quintiles <- factor(MET_quintiles, levels = c(paste0("Q", 1:5), "Missing"))
+
+
+# Step 1: Create BMI category for non-missing values
+polyphenolwithhealth$BMI.Category <- cut(
+  polyphenolwithhealth$BMI,
+  breaks = c(-Inf, 24.9, 29.9, Inf),
+  labels = c("<24.9", "25.0–29.9", "≥30"),
+  include.lowest = TRUE
+)
+
+# Step 2: Convert to character to allow adding "Missing"
+polyphenolwithhealth$BMI.Category <- as.character(polyphenolwithhealth$BMI.Category)
+
+# Step 3: Replace NA with "Missing"
+polyphenolwithhealth$BMI.Category[is.na(polyphenolwithhealth$BMI.Category)] <- "Missing"
+
+# Step 4: Convert back to factor and set desired level order
+polyphenolwithhealth$BMI.Category <- factor(
+  polyphenolwithhealth$BMI.Category,
+  levels = c("<24.9", "25.0–29.9", "≥30", "Missing")
+)
+
+prs_cut <- cut(
+  polyphenolwithhealth$Standard.PRS.for.psoriasis..PSO.,
+  breaks = quantile(polyphenolwithhealth$Standard.PRS.for.psoriasis..PSO., probs = c(0, 1/3, 2/3, 1), na.rm = TRUE),
+  include.lowest = TRUE,
+  labels = c("Low", "Medium", "High")
+)
+
+prs_cut <- as.character(prs_cut)
+prs_cut[is.na(prs_cut)] <- "Missing"
+
+polyphenolwithhealth$PRS.tertile <- factor(prs_cut, levels = c("Low", "Medium", "High", "Missing"))
+
+age_cut <- cut(
+  polyphenolwithhealth$Age.at.recruitment,
+  breaks = c(40, 50, 60, 70),  # adjust if needed
+  include.lowest = TRUE,
+  right = FALSE,
+  labels = c("40–49", "50–59", "60–69")
+)
+
+age_cut <- as.character(age_cut)
+
+polyphenolwithhealth$Age.group <- factor(age_cut, levels = c("40–49", "50–59", "60–69"))
+
+imd_cut <- cut(
+  as.numeric(polyphenolwithhealth$Townsend.deprivation.index.at.recruitment),
+  breaks = quantile(polyphenolwithhealth$Townsend.deprivation.index.at.recruitment, probs = seq(0, 1, 0.25), na.rm = TRUE),
+  include.lowest = TRUE,
+  labels = c("Q1", "Q2", "Q3", "Q4")
+)
+
+imd_cut <- as.character(imd_cut)
+imd_cut[is.na(imd_cut)] <- "Missing"
+
+polyphenolwithhealth$IMD.quartile <- factor(imd_cut, levels = c("Q1", "Q2", "Q3", "Q4", "Missing"))
+
+# Convert back to factor with desired order
+polyphenolwithhealth$AQI.Category <- factor(polyphenolwithhealth$AQI, levels = c("1", "2", "Missing"))
+
+# Categorize and convert to a factor with ordered levels
+polyphenolwithhealth <- polyphenolwithhealth %>%
+  mutate(
+    alcohol.category = case_when(
+      Alcohol < 1  ~ "<1 g/day",
+      Alcohol >= 1 & Alcohol < 8 ~ "1–7 g/day",
+      Alcohol >= 8 & Alcohol < 16 ~ "8–15 g/day",
+      Alcohol >= 16 ~ "16+ g/day"
+    ),
+    alcohol.category = factor(
+      alcohol.category,
+      levels = c("<1 g/day", "1–7 g/day", "8–15 g/day", "16+ g/day")
+    )
+  )
+
+polyphenolwithhealth <- polyphenolwithhealth %>%
+  mutate(
+    level.questionnaires = factor(
+      if_else(Number.of.diet.questionnaires.completed == 1, 
+              "level1", 
+              "level2"),
+      levels = c("level1", "level2")
+    ),
+    
+    multimorbidity = factor(
+      case_when(
+        multimorbidity == 0 ~ "level0",
+        multimorbidity == 1 ~ "level1",
+        multimorbidity >= 2 ~ "level2"
+      ),
+      levels = c("level0", "level1", "level2")
+    )
+  )
+
+polyphenolwithhealth[, 11:70][polyphenolwithhealth[, 11:70] == ""] <- NA
+
+
+#polyphenolwithhealth <- merge(polyphenolwithhealth, p.24h.foods.average[, c(1, 16, 24, 26, 187, 189, 75, 8, 18, 23, 200, 9)], by = "Participant.ID")
+#polyphenolwithhealth[, 74:84][is.na(polyphenolwithhealth[, 74:84])] <- 0
+polyphenolwithhealth <- polyphenolwithhealth %>% filter(Participant.ID %in% participants.recall.over2$Participant.ID)
+```
+
+
+model 1 (PRS tertile)
+Sex
+Age
+Ethnic background
+MET Quintiles
+smoking status
+alcohol category
+multimorbidity
+IMD
+Sodium
+Free.sugar
+processed meat
+
+model 2.2
+AQI
+
+model 3
+BMI
+
+coxph(Survival.Obj ~ polyphenolwithhealth[,i] + Sex + Age.group + Ethnic.background + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + Z.Combined.IMD + Sodium + Free.sugar + meat + PRS.tertile + Genetic.kinship.to.other.participants + Genetic.principal.components...Array.1 + Genetic.principal.components...Array.2 + Genetic.principal.components...Array.3 + Genetic.principal.components...Array.4 + Genetic.principal.components...Array.5 + Genetic.principal.components...Array.6 + Genetic.principal.components...Array.7 + Genetic.principal.components...Array.8 + Genetic.principal.components...Array.9 + Genetic.principal.components...Array.10, data = polyphenolwithhealth)
+
+# cut according to knowledge
+```{r}
+df <- polyphenolwithhealth
+
+# 定义每个变量的 cut4（mg/day）
+specs4 <- list(
+  anthocyanins    = list(breaks = c(-Inf, 0.5, 25, 70, Inf),
+                         labels = c("<0.5","0.5–<25","25–<70","≥70")),
+  `flavan.3.ols`  = list(breaks = c(-Inf, 200, 500, 900, Inf),
+                         labels = c("<200","200–<500","500–<900","≥900")),
+  flavanones      = list(breaks = c(-Inf, 2, 20, 45, Inf),
+                         labels = c("<2","2–<20","20–<45","≥45")),
+  flavonols       = list(breaks = c(-Inf, 25, 40, 55, Inf),
+                         labels = c("<25","25–<40","40–<55","≥55")),
+  flavones        = list(breaks = c(-Inf, 0.5, 1.5, 3, Inf),
+                         labels = c("<0.5","0.5–<1.5","1.5–<3","≥3")),
+  total.flavonoid = list(breaks = c(-Inf, 400, 800, 1100, Inf),
+                         labels = c("<450","450–<800","800–<1100","≥1100"))
+)
+
+# 批量创建 _cat4 和 _ord4
+for(nm in names(specs4)){
+  br  <- specs4[[nm]]$breaks
+  lab <- specs4[[nm]]$labels
+  cat_var <- paste0(nm, "_cat4")
+  ord_var <- paste0(nm, "_ord4")
+  
+  # 创建分类变量
+  df[[cat_var]] <- cut(df[[nm]], breaks = br, right = FALSE, labels = lab)
+  # 创建有序变量
+  df[[ord_var]] <- as.numeric(df[[cat_var]])
+}
+
+# 输出：先显示所有 *_cat4，再显示所有 *_ord4
+cat_vars <- grep("_cat4$", names(df), value = TRUE)
+ord_vars <- grep("_ord4$", names(df), value = TRUE)
+
+# 查看所有 cat4 变量
+cat_table <- df %>%
+  dplyr::select(all_of(cat_vars))
+
+# 查看所有 ord4 变量
+ord_table <- df %>%
+  dplyr::select(all_of(ord_vars))
+
+# 打印结果
+cat_table %>% head()  # 显示前几行分类标签
+ord_table %>% head()  # 显示前几行有序变量（1–4）
+
+# 更新回主数据对象
+
+dietaryscorewithquartile <- df
+
+```
+# key food
+```{r}
+df <- p.24h.foods.average %>%
+  # Step 1: 提取原始变量
+  dplyr::select(
+    Participant.ID,
+    Pure.fruit.vegetable.juice.intake,
+    Olives.intake,
+    Broccoli.intake,
+    Celery.intake,
+    Side.salad.intake,
+    Red.wine.intake
+  ) %>% 
+  # Step 2: 用原始 intake 计算 foodA 和 foodB（先将 NA 视为 0）
+  mutate(
+    foodA_raw = rowSums(across(
+      c(
+        Pure.fruit.vegetable.juice.intake,
+        Olives.intake,
+        Broccoli.intake,
+        Celery.intake,
+        Side.salad.intake,
+        Red.wine.intake
+      ), ~ replace_na(.x, 0)
+    )),
+    
+    foodB_raw = rowSums(across(
+      c(
+        Pure.fruit.vegetable.juice.intake,
+        Olives.intake,
+        Broccoli.intake,
+        Celery.intake,
+        Side.salad.intake
+      ), ~ replace_na(.x, 0)
+    ))
+  ) %>%
+  # Step 3: 对每个原始变量进行分类（NA → 0）
+  mutate(across(
+    .cols = c(
+      Pure.fruit.vegetable.juice.intake,
+      Olives.intake,
+      Broccoli.intake,
+      Celery.intake,
+      Side.salad.intake,
+      Red.wine.intake
+    ),
+    .fns = ~ case_when(
+      is.na(.x) | .x == 0 ~ 0,
+      .x > 0 & .x <= 1 ~ 1,
+      .x > 1 ~ 2
+    ),
+    .names = "{.col}_cat"
+  )) %>%
+  # Step 4: foodA_raw / foodB_raw 的分类
+  mutate(
+    foodA_cat = case_when(
+      foodA_raw == 0 ~ 0,
+      foodA_raw > 0 & foodA_raw <= 1 ~ 1,
+      foodA_raw > 1 ~ 2
+    ),
+    foodB_cat = case_when(
+      foodB_raw == 0 ~ 0,
+      foodB_raw > 0 & foodB_raw <= 1 ~ 1,
+      foodB_raw > 1 ~ 2
+    )
+  ) %>%
+  # Step 5: 保留 ID
+  filter(Participant.ID %in% polyphenolwithhealth$Participant.ID)
+
+
+dietaryscorewithquartile <- merge(polyphenolwithhealth, df[, c(1, 10:17)], by = "Participant.ID")
+```
+
+
+
+# RCS
+```{r}
+library(rms)
+
+#==== 0) Data ====
+df <- polyphenolwithhealth
+
+# Complete-case (or use your own imputation pipeline)
+df <- df %>% drop_na(survival.time, event, flavones)
+#df$flavones <- log1p(df$flavones)
+#df$flavanones <- log1p(df$flavanones)
+
+#==== 1) rms setup ====
+dd <- datadist(df)
+options(datadist = "dd")
+# Choose knots (Harrell often uses 4–5 knots). Example: 4 knots at 5/35/65/95%
+kn_5 <- quantile(df$flavones, probs = c(0.05, 0.275, 0.50, 0.725, 0.95), na.rm = TRUE)
+
+#==== 2) Fit Cox with RCS ====
+fit_rcs <- cph(
+  Surv(survival.time, event) ~ 
+    rcs(flavones, knots = kn_5)  + Sex + Age.group + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + IMD.quartile + Qualification + Energy + Free.sugar + meat + wholegrain + BMI.Category,
+  data = df, x = TRUE, y = TRUE
+)
+
+#==== 3) Test overall & nonlinearity ====
+# anova: 'Nonlinear' line gives the non-linear part p-value
+anova(fit_rcs)
+
+#==== 4) Plot HR curve (reference at a chosen value, e.g., 20th percentile) ====
+ref_val <- as.numeric(quantile(df$flavones, 0.20, na.rm = TRUE))
+
+# 2) 取得样条在全范围上的线性预测 (log-HR 尺度)
+pred_lin <- Predict(fit_rcs, flavones, conf.int = 0.95)  # 不要传 ref=
+
+# 3) 在参考点的线性预测
+ref_lin  <- Predict(fit_rcs, flavones = ref_val, conf.int = 0.95)
+
+# 4) 把曲线以参考点居中，并转为 HR
+pred_df <- as.data.frame(pred_lin)
+ref_y   <- as.numeric(ref_lin$yhat)
+
+pred_df <- pred_df %>%
+  mutate(HR   = exp(yhat  - ref_y),
+         HRlo = exp(lower - ref_y),
+         HRhi = exp(upper - ref_y))
+
+# 5) 画图
+# 创建 knots 数据框，用于在曲线上标点
+knot_df <- data.frame(flavones = kn_5) %>%
+  rowwise() %>%
+  mutate(
+    flavones_nearest = pred_df$flavones[which.min(abs(pred_df$flavones - flavones))],
+    HR   = pred_df$HR[which.min(abs(pred_df$flavones - flavones))],
+    HRlo = pred_df$HRlo[which.min(abs(pred_df$flavones - flavones))],
+    HRhi = pred_df$HRhi[which.min(abs(pred_df$flavones - flavones))]
+  ) %>%
+  ungroup()
+
+pA_overall   <- 0.012
+pA_nonlinear <- 0.006
+
+# 小工具：格式化 P 值显示
+fmt_p <- function(p) {
+  if (is.na(p)) return("NA")
+  if (p < 0.001) "<0.001" else sprintf("%.3f", p)
+}
+
+label_A <- bquote(italic(P)[overall] == .(fmt_p(pA_overall)) ~ "," ~ 
+                  italic(P)[nonlinear] == .(fmt_p(pA_nonlinear)))
+label_A_str <- as.character(as.expression(label_A))
+
+# 2️⃣ 绘图：曲线上显示 knot 点
+res_A <- ggplot(pred_df, aes(x = flavones, y = HR)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = HRlo, ymax = HRhi), alpha = 0.2) +
+  geom_vline(xintercept = ref_val, linetype = 2, color = "grey50") +
+  geom_point(data = knot_df, aes(x = flavones_nearest, y = HR),
+             color = "red", size = 2.5) +
+  geom_text(data = knot_df,
+            aes(x = flavones_nearest, y = HR,
+                label = paste0("K", 1:nrow(knot_df))),
+            vjust = -1, color = "red", size = 3.2) +
+  labs(x = "Flavone intake (mg/day)",
+       y = "Hazard Ratio") +
+  theme_classic(base_size = 13) +
+  annotate("text", x = Inf, y = Inf, 
+           label = label_A_str,
+           hjust = 1.05, vjust = 1.5, size = 4, parse = TRUE)
+
+
+
+
+
+
+library(dplyr)
+library(rms)
+library(survival)
+library(ggplot2)
+
+#===========================
+# 0. 数据准备
+#===========================
+df2 <- polyphenolwithhealth %>% 
+  drop_na(survival.time, event, flavones, PRS.tertile)
+
+#===========================
+# 1. rms setup
+#===========================
+dd <- datadist(df)
+options(datadist = "dd")
+# 共用 knots
+kn <- quantile(df2$flavones, probs = c(0.05, 0.275, 0.50, 0.725, 0.95))
+
+# reference point
+ref_val <- quantile(df2$flavones, 0.20, na.rm = TRUE)
+
+
+#===========================
+# 2. Function to fit spline for each PRS group
+#===========================
+fit_spline_group <- function(data_sub) {
+
+  fit <- cph(
+    Surv(survival.time, event) ~ 
+      rcs(flavones, knots = kn) +
+      Sex + Age.group + MET.Quintiles + Smoking.status...Instance.0 +
+      alcohol.category + multimorbidity + IMD.quartile +
+      Qualification + Energy + Free.sugar + meat + wholegrain + BMI.Category,
+    data = data_sub,
+    x = TRUE, y = TRUE
+  )
+  
+  # Predict HR curve
+  pred_lin <- Predict(fit, flavones, conf.int = 0.95)
+  pred_df  <- as.data.frame(pred_lin)
+  
+  # reference correction
+  ref_hat <- Predict(fit, flavones = ref_val)$yhat
+  
+  pred_df <- pred_df %>%
+    mutate(
+      HR   = exp(yhat - ref_hat),
+      HRlo = exp(lower - ref_hat),
+      HRhi = exp(upper - ref_hat)
+    )
+  
+  pred_df
+}
+
+#===========================
+# 3. Run spline for each PRS-level
+#===========================
+spl_low  <- fit_spline_group(df2 %>% filter(PRS.tertile == "Low"))
+spl_mid  <- fit_spline_group(df2 %>% filter(PRS.tertile == "Medium"))
+spl_high <- fit_spline_group(df2 %>% filter(PRS.tertile == "High"))
+
+#===========================
+# 4. Combine into one dataset
+#===========================
+df_plot <- bind_rows(
+  spl_low  %>% mutate(PRS = "Low PRS"),
+  spl_mid  %>% mutate(PRS = "Medium PRS"),
+  spl_high %>% mutate(PRS = "High PRS")
+)
+
+
+#===========================
+# 5. Make P-value labels using bquote (你的要求)
+#===========================
+
+make_label <- function(overall, nonlinear) {
+  as.character(
+    as.expression(
+      bquote(italic(P)[overall] == .(overall) ~ "," ~ italic(P)[nonlinear] == .(nonlinear))
+    )
+  )
+}
+
+label_low    <- make_label(0.86, 0.73)
+label_medium <- make_label(0.27, 0.16)
+label_high   <- make_label(0.003, 0.002)
+
+
+#===========================
+# 6. Plot (三条 PRS spline)
+#===========================
+df_plot$PRS <- factor(df_plot$PRS, levels = c("High PRS", "Medium PRS", "Low PRS"))
+ggplot(df_plot, aes(x = flavones, y = HR, color = PRS)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = HRlo, ymax = HRhi, fill = PRS),
+            alpha = 0.1, color = NA,
+            show.legend = FALSE) +
+  geom_vline(xintercept = ref_val, linetype = 2, color = "grey50") +
+  theme_classic(base_size = 14) +
+  scale_color_manual(values = c("#0072B2", "#009E73", "#D55E00")) +
+  scale_fill_manual(values   = c("#0072B2", "#009E73", "#D55E00")) +
+  
+  # ==== y 轴限制 ====
+  coord_cartesian(ylim = c(0, 5)) +
+  
+  labs(
+    x = "Flavone intake (mg/day)",
+    y = "Hazard Ratio",
+    color = "PRS tertile"
+  ) +
+
+  # --- Annotations with more spacing ---
+  annotate("text",
+           x = Inf, y = Inf,
+           label = as.character(as.expression(
+             bquote("Low PRS:" ~ 
+                    italic(P)[overall] == 0.88 ~ "," ~ 
+                    italic(P)[nonlinear] == 0.75)
+           )),
+           hjust = 1.05, vjust = 4.5,
+           parse = TRUE, size = 3) +
+
+  annotate("text",
+           x = Inf, y = Inf,
+           label = as.character(as.expression(
+             bquote("Medium PRS:" ~ 
+                    italic(P)[overall] == 0.24 ~ "," ~ 
+                    italic(P)[nonlinear] == 0.14)
+           )),
+           hjust = 1.05, vjust = 3.0,
+           parse = TRUE, size = 3) +
+
+  annotate("text",
+           x = Inf, y = Inf,
+           label = as.character(as.expression(
+             bquote("High PRS:" ~ 
+                    italic(P)[overall] == 0.004 ~ "," ~ 
+                    italic(P)[nonlinear] == 0.002)
+           )),
+           hjust = 1.05, vjust = 1.5,
+           parse = TRUE, size = 3)
+```
+# RCS for food
+```{r}
+#==== 0) Data ====
+df1 <- merge(df[, c(1, 8, 9)], polyphenolwithhealth, by = "Participant.ID")
+
+# Complete-case (or use your own imputation pipeline)
+df1 <- df1 %>% drop_na(survival.time, event, foodB_raw)
+#df$foodB_raw <- log1p(df$foodB_raw)
+#df$flavanones <- log1p(df$flavanones)
+
+#==== 1) rms setup ====
+dd <- datadist(df1)
+options(datadist = "dd")
+# Choose knots (Harrell often uses 4–5 knots). Example: 4 knots at 5/35/65/95%
+kn_5 <- quantile(df$foodB_raw, probs = c(0.05, 0.275, 0.50, 0.725, 0.95), na.rm = TRUE)
+
+#==== 2) Fit Cox with RCS ====
+fit_rcs <- cph(
+  Surv(survival.time, event) ~ 
+    rcs(foodB_raw, knots = kn_5)  + Sex + Age.group + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + IMD.quartile + Qualification + Energy + Free.sugar + meat + wholegrain + BMI.Category,
+  data = df1, x = TRUE, y = TRUE
+)
+
+#==== 3) Test overall & nonlinearity ====
+# anova: 'Nonlinear' line gives the non-linear part p-value
+anova(fit_rcs)
+
+#==== 4) Plot HR curve (reference at a chosen value, e.g., 20th percentile) ====
+ref_val <- as.numeric(quantile(df$foodB_raw, 0.20, na.rm = TRUE))
+
+# 2) 取得样条在全范围上的线性预测 (log-HR 尺度)
+pred_lin <- Predict(fit_rcs, foodB_raw, conf.int = 0.95)  # 不要传 ref=
+
+# 3) 在参考点的线性预测
+ref_lin  <- Predict(fit_rcs, foodB_raw = ref_val, conf.int = 0.95)
+
+# 4) 把曲线以参考点居中，并转为 HR
+pred_df <- as.data.frame(pred_lin)
+ref_y   <- as.numeric(ref_lin$yhat)
+
+pred_df <- pred_df %>%
+  mutate(HR   = exp(yhat  - ref_y),
+         HRlo = exp(lower - ref_y),
+         HRhi = exp(upper - ref_y))
+
+# 5) 画图
+# 创建 knots 数据框，用于在曲线上标点
+knot_df <- data.frame(foodB_raw = kn_5) %>%
+  rowwise() %>%
+  mutate(
+    foodB_raw_nearest = pred_df$foodB_raw[which.min(abs(pred_df$foodB_raw - foodB_raw))],
+    HR   = pred_df$HR[which.min(abs(pred_df$foodB_raw - foodB_raw))],
+    HRlo = pred_df$HRlo[which.min(abs(pred_df$foodB_raw - foodB_raw))],
+    HRhi = pred_df$HRhi[which.min(abs(pred_df$foodB_raw - foodB_raw))]
+  ) %>%
+  ungroup()
+
+pA_overall   <- 0.023
+pA_nonlinear <- 0.012
+
+# 小工具：格式化 P 值显示
+fmt_p <- function(p) {
+  if (is.na(p)) return("NA")
+  if (p < 0.001) "<0.001" else sprintf("%.3f", p)
+}
+
+label_A <- bquote(italic(P)[overall] == .(fmt_p(pA_overall)) ~ "," ~ 
+                    italic(P)[nonlinear] == .(fmt_p(pA_nonlinear)))
+label_A_str <- as.character(as.expression(label_A))
+
+# 2️⃣ 绘图：曲线上显示 knot 点
+res_A <- ggplot(pred_df, aes(x = foodB_raw, y = HR)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = HRlo, ymax = HRhi), alpha = 0.2) +
+  geom_vline(xintercept = ref_val, linetype = 2, color = "grey50") +
+  geom_point(data = knot_df, aes(x = foodB_raw_nearest, y = HR),
+             color = "red", size = 2.5) +
+  geom_text(data = knot_df,
+            aes(x = foodB_raw_nearest, y = HR,
+                label = paste0("K", 1:nrow(knot_df))),
+            vjust = -1, color = "red", size = 3.2) +
+  labs(x = "Food intake (servings/d)",
+       y = "Hazard Ratio") +
+  theme_classic(base_size = 13) + 
+  labs(title = "B. Flavone-rich food") +
+  annotate("text", x = Inf, y = Inf, 
+           label = label_A_str,
+           hjust = 1.05, vjust = 1.5, size = 4, parse = TRUE)
+
+
+
+df1 <- merge(df[, c(1, 8, 9)], polyphenolwithhealth, by = "Participant.ID")
+
+# Complete-case (or use your own imputation pipeline)
+df1 <- df1 %>% drop_na(survival.time, event, foodA_raw)
+#df$foodA_raw <- log1p(df$foodA_raw)
+#df$flavanones <- log1p(df$flavanones)
+
+#==== 1) rms setup ====
+dd <- datadist(df1)
+options(datadist = "dd")
+# Choose knots (Harrell often uses 4–5 knots). Example: 4 knots at 5/35/65/95%
+kn_5 <- quantile(df$foodA_raw, probs = c(0.05, 0.275, 0.50, 0.725, 0.95), na.rm = TRUE)
+
+#==== 2) Fit Cox with RCS ====
+fit_rcs <- cph(
+  Surv(survival.time, event) ~ 
+    rcs(foodA_raw, knots = kn_5)  + Sex + Age.group + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + IMD.quartile + Qualification + Energy + Free.sugar + meat + wholegrain + BMI.Category,
+  data = df1, x = TRUE, y = TRUE
+)
+
+#==== 3) Test overall & nonlinearity ====
+# anova: 'Nonlinear' line gives the non-linear part p-value
+anova(fit_rcs)
+
+#==== 4) Plot HR curve (reference at a chosen value, e.g., 20th percentile) ====
+ref_val <- as.numeric(quantile(df$foodA_raw, 0.20, na.rm = TRUE))
+
+# 2) 取得样条在全范围上的线性预测 (log-HR 尺度)
+pred_lin <- Predict(fit_rcs, foodA_raw, conf.int = 0.95)  # 不要传 ref=
+
+# 3) 在参考点的线性预测
+ref_lin  <- Predict(fit_rcs, foodA_raw = ref_val, conf.int = 0.95)
+
+# 4) 把曲线以参考点居中，并转为 HR
+pred_df <- as.data.frame(pred_lin)
+ref_y   <- as.numeric(ref_lin$yhat)
+
+pred_df <- pred_df %>%
+  mutate(HR   = exp(yhat  - ref_y),
+         HRlo = exp(lower - ref_y),
+         HRhi = exp(upper - ref_y))
+
+# 5) 画图
+# 创建 knots 数据框，用于在曲线上标点
+knot_df <- data.frame(foodA_raw = kn_5) %>%
+  rowwise() %>%
+  mutate(
+    foodA_raw_nearest = pred_df$foodA_raw[which.min(abs(pred_df$foodA_raw - foodA_raw))],
+    HR   = pred_df$HR[which.min(abs(pred_df$foodA_raw - foodA_raw))],
+    HRlo = pred_df$HRlo[which.min(abs(pred_df$foodA_raw - foodA_raw))],
+    HRhi = pred_df$HRhi[which.min(abs(pred_df$foodA_raw - foodA_raw))]
+  ) %>%
+  ungroup()
+
+pA_overall   <- 0.14
+pA_nonlinear <- 0.08
+
+# 小工具：格式化 P 值显示
+fmt_p <- function(p) {
+  if (is.na(p)) return("NA")
+  if (p < 0.001) "<0.001" else sprintf("%.3f", p)
+}
+
+label_A <- bquote(italic(P)[overall] == .(fmt_p(pA_overall)) ~ "," ~ 
+                    italic(P)[nonlinear] == .(fmt_p(pA_nonlinear)))
+label_A_str <- as.character(as.expression(label_A))
+
+# 2️⃣ 绘图：曲线上显示 knot 点
+res_B <- ggplot(pred_df, aes(x = foodA_raw, y = HR)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = HRlo, ymax = HRhi), alpha = 0.2) +
+  geom_vline(xintercept = ref_val, linetype = 2, color = "grey50") +
+  geom_point(data = knot_df, aes(x = foodA_raw_nearest, y = HR),
+             color = "red", size = 2.5) +
+  geom_text(data = knot_df,
+            aes(x = foodA_raw_nearest, y = HR,
+                label = paste0("K", 1:nrow(knot_df))),
+            vjust = -1, color = "red", size = 3.2) +
+  labs(x = "Food intake (servings/d)",
+       y = "Hazard Ratio") +
+  theme_classic(base_size = 13) + 
+  labs(title = "A. Flavone-rich food and wine") +
+  annotate("text", x = Inf, y = Inf, 
+           label = label_A_str,
+           hjust = 1.05, vjust = 1.5, size = 4, parse = TRUE)
+
+library(cowplot)
+
+combined_plot <- plot_grid(
+  res_B, res_A,
+  ncol = 2,           # 两列
+  rel_widths = c(2,2) # 比例可调
+)
+
+combined_plot
+
+
+```
+
+
+
+# forest plot
+```{r}
+# Load the data
+table3 <- read.csv("diet quality output/table2.csv")  # Replace with your correct file name
+table3$Person.years <- round(table3$Person.years, 0)
+table3$Person.years <- ifelse(is.na(table3$Person.years), "", table3$Person.years)
+
+# Prepare three empty columns for the plot (Model1, Model2, and Model3)
+table3 <- table3 %>%
+  mutate( 'Flavonoid subclass (mg/d)' = Flavonoid.subclass..mg.d.,
+         'Cases/Total (Incidence %)' = Case.total..incidence...,
+         'Person years' = Person.years,
+    `Model 1;HR (95% CI)` = Model.1..HR..95..CI.,
+    `Model 2;HR (95% CI)` = Model.2..HR..95..CI.,
+    `Model 3;HR (95% CI)` = Model.3..HR..95..CI.)
+# Modify the `p value` column
+
+
+parse_ci <- function(ci_vec) {
+  strcapture(
+    pattern = "^\\s*([0-9.+-eE]+)\\s*\\(\\s*([0-9.+-eE]+)\\s*-\\s*([0-9.+-eE]+)\\s*\\)\\s*$",
+    x = ci_vec,
+    proto = list(HR = double(), lower = double(), upper = double())
+  )
+}
+
+table3 <- cbind(table3, parse_ci(table3$`Model 1;HR (95% CI)`), parse_ci(table3$`Model 2;HR (95% CI)`), parse_ci(table3$`Model 3;HR (95% CI)`))
+
+names(table3) <- make.unique(names(table3))
+names(table3)
+
+table3$`Model1` <- paste(rep(" ", 22), collapse = " ")
+table3$`Model2` <- paste(rep(" ", 22), collapse = " ")
+table3$`Model3` <- paste(rep(" ", 22), collapse = " ")
+
+table3 <- table3 %>%
+  mutate(
+    HR    = as.numeric(HR),
+    lower = as.numeric(lower),
+    upper = as.numeric(upper),
+    HR.1    = as.numeric(HR.1),
+    lower.1 = as.numeric(lower.1),
+    upper.1 = as.numeric(upper.1),
+    HR.2    = as.numeric(HR.2),
+    lower.2 = as.numeric(lower.2),
+    upper.2 = as.numeric(upper.2))
+
+library(knitr)
+library(forestploter)
+library(grid)
+# Forest plot
+plot3 <- forest(
+  table3[, c(7, 8, 9, 10, 22, 11, 23, 12, 24 )],  # Select relevant columns for the plot
+  est = list(table3$HR, table3$HR.1, table3$HR.2),  # HR values for Model 1, Model 2, and Model 3
+  lower = list(table3$lower, table3$lower.1, table3$lower.2),  # Lower bounds for the confidence intervals
+  upper = list(table3$upper, table3$upper.1, table3$upper.2),
+  ci_column = c(5, 7, 9),  # Positions for the three models
+  ref.line = 1  # Reference line at 1
+)
+
+# Customize the plot appearance
+tm <- forest_theme(
+  base_size = 10,  # Text size
+  ci_pch = 15,  # Shape of CI points
+  ci_col = "#762a83",  # CI color
+  ci_fill = "blue",  # CI fill color
+  ci_alpha = 0.8,  # Transparency of CI
+  ci_lty = 1,  # Line type for CI
+  ci_lwd = 1.5,  # Line width for CI
+  ci_Theight = 0.2,  # Height of CI lines
+  refline_gp = gpar(col = "grey20", lwd = 1, lty = "dashed")  # Graphical parameters for reference line
+)
+
+
+# Apply theme to the plot and set axis limits
+plot3 <- forest(
+  table3[, c(7, 8, 9, 10, 22, 11, 23, 12, 24 )],  # Select relevant columns for the plot
+  est = list(table3$HR, table3$HR.1, table3$HR.2),  # HR values for Model 1, Model 2, and Model 3
+  lower = list(table3$lower, table3$lower.1, table3$lower.2),  # Lower bounds for the confidence intervals
+  upper = list(table3$upper, table3$upper.1, table3$upper.2),
+  ci_column = c(5, 7, 9),  # Positions for the three models
+  ref_line = 1,  # Reference line at 1
+  xlim = c(0.50, 1.50),  # X-axis limits
+  ticks_at = c(0.55, 0.70, 0.85, 1, 1.15, 1.30, 1.45),  # Tick marks on X-axis
+  theme = tm  # Apply the theme
+)
+
+
+plot3
+
+ggsave(filename = "figure2.tiff",
+       plot = plot3,
+       dpi = 900,
+       width = 15,
+       height = 9)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Load the data
+table3 <- read.csv("diet quality output/table3.csv")  # Replace with your correct file name
+table3$Person.years <- round(table3$Person.years, 0)
+table3$Person.years <- ifelse(is.na(table3$Person.years), "", table3$Person.years)
+
+# Prepare three empty columns for the plot (Model1, Model2, and Model3)
+table3 <- table3 %>%
+  mutate( #'Flavonoid subclass (mg/d)' = Flavonoid.subclass..mg.d.,
+    'Flavone food' = Food,
+         'Cases/Total (Incidence %)' = Case.total..incidence...,
+         'Person years' = Person.years,
+    `Model 1;HR (95% CI)` = Model.1..HR..95..CI.,
+    `Model 2;HR (95% CI)` = Model.2..HR..95..CI.,
+    `Model 3;HR (95% CI)` = Model.3..HR..95..CI.)
+# Modify the `p value` column
+
+
+parse_ci <- function(ci_vec) {
+  strcapture(
+    pattern = "^\\s*([0-9.+-eE]+)\\s*\\(\\s*([0-9.+-eE]+)\\s*-\\s*([0-9.+-eE]+)\\s*\\)\\s*$",
+    x = ci_vec,
+    proto = list(HR = double(), lower = double(), upper = double())
+  )
+}
+
+table3 <- cbind(table3, parse_ci(table3$`Model 1;HR (95% CI)`), parse_ci(table3$`Model 2;HR (95% CI)`), parse_ci(table3$`Model 3;HR (95% CI)`))
+
+names(table3) <- make.unique(names(table3))
+names(table3)
+
+table3$`Model1` <- paste(rep(" ", 22), collapse = " ")
+table3$`Model2` <- paste(rep(" ", 22), collapse = " ")
+table3$`Model3` <- paste(rep(" ", 22), collapse = " ")
+
+table3 <- table3 %>%
+  mutate(
+    HR    = as.numeric(HR),
+    lower = as.numeric(lower),
+    upper = as.numeric(upper),
+    HR.1    = as.numeric(HR.1),
+    lower.1 = as.numeric(lower.1),
+    upper.1 = as.numeric(upper.1),
+    HR.2    = as.numeric(HR.2),
+    lower.2 = as.numeric(lower.2),
+    upper.2 = as.numeric(upper.2))
+
+library(knitr)
+library(forestploter)
+library(grid)
+# Forest plot
+plot3 <- forest(
+  table3[, c(7, 8, 9, 10, 22, 11, 23, 12, 24 )],  # Select relevant columns for the plot
+  est = list(table3$HR, table3$HR.1, table3$HR.2),  # HR values for Model 1, Model 2, and Model 3
+  lower = list(table3$lower, table3$lower.1, table3$lower.2),  # Lower bounds for the confidence intervals
+  upper = list(table3$upper, table3$upper.1, table3$upper.2),
+  ci_column = c(5, 7, 9),  # Positions for the three models
+  ref.line = 1  # Reference line at 1
+)
+
+# Customize the plot appearance
+tm <- forest_theme(
+  base_size = 10,  # Text size
+  ci_pch = 15,  # Shape of CI points
+  ci_col = "#762a83",  # CI color
+  ci_fill = "blue",  # CI fill color
+  ci_alpha = 0.8,  # Transparency of CI
+  ci_lty = 1,  # Line type for CI
+  ci_lwd = 1.5,  # Line width for CI
+  ci_Theight = 0.2,  # Height of CI lines
+  refline_gp = gpar(col = "grey20", lwd = 1, lty = "dashed")  # Graphical parameters for reference line
+)
+
+
+# Apply theme to the plot and set axis limits
+plot3 <- forest(
+  table3[, c(7, 8, 9, 10, 22, 11, 23, 12, 24 )],  # Select relevant columns for the plot
+  est = list(table3$HR, table3$HR.1, table3$HR.2),  # HR values for Model 1, Model 2, and Model 3
+  lower = list(table3$lower, table3$lower.1, table3$lower.2),  # Lower bounds for the confidence intervals
+  upper = list(table3$upper, table3$upper.1, table3$upper.2),
+  ci_column = c(5, 7, 9),  # Positions for the three models
+  ref_line = 1,  # Reference line at 1
+  xlim = c(0.50, 1.50),  # X-axis limits
+  ticks_at = c(0.55, 0.70, 0.85, 1, 1.15, 1.30, 1.45),  # Tick marks on X-axis
+  theme = tm  # Apply the theme
+)
+
+
+plot3
+
+ggsave(filename = "figure3.tiff",
+       plot = plot3,
+       dpi = 900,
+       width = 15,
+       height = 10)
+
+
+#1500 900
+```
+
+# KM
+```{r}
+library(dplyr)
+library(survival)
+library(survminer)
+library(ggplot2)
+library(cowplot)
+
+# ============================================================
+# 1. Create correct flavone factor (quartile 1–4)
+# ============================================================
+dietaryscorewithquartile$flavone <- factor(
+  dietaryscorewithquartile$flavones_ord4,
+  levels = c(1, 2, 3, 4),
+  labels = c("Q1", "Q2", "Q3", "Q4")
+)
+
+# ============================================================
+# 2. Fit Cox model (x=TRUE & model=TRUE required)
+# ============================================================
+model.uni <- coxph(
+  Survival.Obj ~ flavone + Sex + Age.group + MET.Quintiles +
+    Smoking.status...Instance.0 + alcohol.category + multimorbidity +
+    IMD.quartile + Qualification + Energy + Free.sugar + meat +
+    wholegrain + BMI.Category,
+  data = dietaryscorewithquartile,
+  ties = "efron",
+  x = TRUE, model = TRUE
+)
+
+# ============================================================
+# 3. Mode function for factor covariates
+# ============================================================
+mode_ <- function(x) {
+  names(which.max(table(x)))
+}
+
+# ============================================================
+# 4. Build reference covariate row
+# ============================================================
+ref_row <- data.frame(
+  Sex                                 = mode_(dietaryscorewithquartile$Sex),
+  Age.group                           = mode_(dietaryscorewithquartile$Age.group),
+  MET.Quintiles                       = mode_(dietaryscorewithquartile$MET.Quintiles),
+  Smoking.status...Instance.0         = mode_(dietaryscorewithquartile$Smoking.status...Instance.0),
+  alcohol.category                    = mode_(dietaryscorewithquartile$alcohol.category),
+  multimorbidity                      = mode_(dietaryscorewithquartile$multimorbidity),
+  IMD.quartile                        = mode_(dietaryscorewithquartile$IMD.quartile),
+  Qualification                       = mode_(dietaryscorewithquartile$Qualification),
+
+  # For numeric covariates, use median (mode makes no sense)
+  Energy                              = median(dietaryscorewithquartile$Energy, na.rm = TRUE),
+  Free.sugar                          = median(dietaryscorewithquartile$Free.sugar, na.rm = TRUE),
+  meat                                = median(dietaryscorewithquartile$meat, na.rm = TRUE),
+  wholegrain                          = median(dietaryscorewithquartile$wholegrain, na.rm = TRUE),
+
+  BMI.Category                        = mode_(dietaryscorewithquartile$BMI.Category)
+)
+
+# ============================================================
+# 5. Create 4 copies (one for each flavone quartile)
+# ============================================================
+# replicate returns a list of data frames
+nd_list <- replicate(4, ref_row, simplify = FALSE)
+
+# row-bind into a clean data.frame
+newdata <- do.call(rbind, nd_list)
+
+# add flavone column
+newdata$flavone <- factor(c("Q1","Q2","Q3","Q4"),
+                          levels = c("Q1","Q2","Q3","Q4"))
+
+# ----------------------------
+# 6. Match factor levels with model
+# ----------------------------
+for (v in names(model.uni$xlevels)) {
+  if (v %in% names(newdata)) {
+    newdata[[v]] <- factor(newdata[[v]],
+                           levels = model.uni$xlevels[[v]])
+  }
+}
+
+print(newdata)   # now shows a true data.frame
+
+# ----------------------------
+# 7. Predict adjusted survival
+# ----------------------------
+max_time <- max(dietaryscorewithquartile$survival.time, na.rm=TRUE)
+
+sf_adj <- survfit(
+  model.uni,
+  newdata = newdata,
+  se.fit = TRUE,
+  conf.type = "log",
+  # 指定真实的时间序列
+  time = seq(0, max_time, by = 0.1)
+)
+# Inspect survival object
+print(sf_adj)
+
+
+# Plot adjusted curves with CI ribbons
+p_adj <- ggsurvplot(
+  sf_adj,
+  data = newdata,
+  conf.int = TRUE,
+  #legend.title = "flavone",
+  #legend = "none",
+  palette = "Dark2",
+  ggtheme = theme_classic(base_size = 12),
+  xlab = "Time (years)", 
+  ylab = "Survival probability",
+  ylim = c(0.976, 1.00)      # ← 调整纵轴范围（建议 0.9~1）
+)
+
+p_adj$plot <- p_adj$plot + 
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(size = 11),
+    legend.text  = element_text(size = 10)
+  )
+
+p_adj$plot <- p_adj$plot + labs(title = "C. High genetic risk")
+
+# KM only for the risk table
+fit_km <- survfit(Survival.Obj ~ flavone, data = dietaryscorewithquartile)
+km_plot <- ggsurvplot(
+  fit_km, data = dietaryscorewithquartile,
+  risk.table = TRUE,
+  risk.table.type = "nrisk_cumevents",
+  risk.table.title = "Participants at risk",
+  risk.table.height = 0.30,
+  risk.table.fontsize = 3.6,
+  risk.table.y.text = TRUE,
+  risk.table.y.text.col = FALSE,
+  break.time.by = 2.5,
+  conf.int = FALSE,
+  legend = "none",
+  xlab = "Time (years)", ylab = NULL,
+  ggtheme = theme_classic(base_size = 12),
+  tables.theme = theme_cleantable()
+)
+
+final_plot3 <- plot_grid(p_adj$plot, km_plot$table, ncol = 1, rel_heights = c(0.72, 0.28))
+print(final_plot3)
+
+
+
+library(cowplot)
+
+combined_plot <- plot_grid(
+  final_plot1, final_plot2, final_plot3,
+  nrow = 3,           # 两列
+  rel_widths = c(3,3,3) # 比例可调
+)
+
+combined_plot
+
+
+# 1000 800
+
+```
+
+
+
+# model 1
+```{r}
+# Initialize an empty data frame to store the results
+dietary.score.results <- data.frame()
+
+# Define the survival object
+polyphenolwithhealth$Survival.Obj <- with(polyphenolwithhealth, Surv(survival.time, event))
+
+# Loop through columns 3 to 89 (assumed dietary scores)
+for (i in c(3:8)) {
+  
+  # Run univariate Cox model
+  model.uni <- coxph(Survival.Obj ~ polyphenolwithhealth[,i] + Sex + Age.group + Ethnic.background + multimorbidity + IMD.quartile + Qualification, data = polyphenolwithhealth)
+  
+  # Extract variable name
+  x <- names(polyphenolwithhealth)[i]
+  y <- "Survival.Obj"
+  
+  # Extract model statistics
+  coefficients <- coef(model.uni)[1]
+  se <- summary(model.uni)$coefficients[1, "se(coef)"]
+  z.value <- summary(model.uni)$coefficients[1, "z"]
+  p.value <- summary(model.uni)$coefficients[1, "Pr(>|z|)"]
+  ci.lower <- exp(confint(model.uni)[1, 1])
+  ci.upper <- exp(confint(model.uni)[1, 2])
+  hr <- exp(coefficients)
+  
+  # Format HR and CI
+  formatted.hr <- sprintf("%.3f", hr)
+  formatted.ci.lower <- sprintf("%.3f", ci.lower)
+  formatted.ci.upper <- sprintf("%.3f", ci.upper)
+  CI <- paste0(formatted.hr, " (", formatted.ci.lower, "-", formatted.ci.upper, ")")
+  
+  # Number of non-missing observations
+  n <- sum(!is.na(polyphenolwithhealth[, i]))
+  
+  # Calculate person-years
+  person.years <- sum(polyphenolwithhealth$survival.time[!is.na(polyphenolwithhealth[, i])], na.rm = TRUE)
+  
+  # Calculate number of cases and incidence
+  cases <- sum(polyphenolwithhealth$group == "psoriasis" & !is.na(polyphenolwithhealth[, i]))
+  incidence <- cases / n * 100
+  cases.total <- paste0(cases, "/", n, " (", sprintf("%.3f", incidence), ")")
+
+  # Store the results
+  results <- data.frame(
+    Nutrient = x,
+    case = cases,
+    total = n,
+    incidence = incidence,
+    Case.Total = cases.total,
+    Person.Years = round(person.years, 1),
+    HR.95.CI = CI,
+    P.value = signif(p.value, 3)
+  )
+  
+  # Append to the main results data frame
+  dietary.score.results <- rbind(dietary.score.results, results)
+}
+
+# Print the results
+print(dietary.score.results)
+
+# Save the results to a CSV file
+write.csv(dietary.score.results, "diet quality output/flavonoid dose model 2.2.csv")
+```
+
+## add for quartiles
+```{r}
+dietaryscorewithquartile <- polyphenolwithhealth %>%
+  mutate(across(3:8, ~ cut(., breaks = quantile(., probs = 0:4 / 4, na.rm = TRUE), 
+                             include.lowest = TRUE, labels = FALSE), 
+                .names = "quartile_{col}"))
+
+dietaryscorewithquartile <- dietaryscorewithquartile[, c(1:2, 72:77, 9:71)]
+
+
+# Initialize an empty data frame to store the results
+dietary.score.results <- data.frame()
+
+# Define the survival object
+dietaryscorewithquartile$Survival.Obj <- with(dietaryscorewithquartile, Surv(survival.time, event))
+
+# Loop through dietary score columns (quartile variables)
+for (i in c(72:79)) {
+  
+  # Run Cox model with quartiles treated as factors (Q1 as reference)
+  model.uni <- coxph(Survival.Obj ~ factor(dietaryscorewithquartile[, i]) + Sex + Age.group + multimorbidity + Qualification, data = dietaryscorewithquartile)
+  
+  # Extract variable name
+  nutrient <- names(dietaryscorewithquartile)[i]
+  response <- "Survival.Obj"
+  
+  # Loop through Q2–Q4 (compared to Q1)
+  for (j in 2:4) {
+    
+    # Extract statistics
+    coef_j <- coef(model.uni)[j - 1]
+    se_j <- summary(model.uni)$coefficients[j - 1, "se(coef)"]
+    z_j <- summary(model.uni)$coefficients[j - 1, "z"]
+    p_j <- summary(model.uni)$coefficients[j - 1, "Pr(>|z|)"]
+    ci_lower <- exp(confint(model.uni)[j - 1, 1])
+    ci_upper <- exp(confint(model.uni)[j - 1, 2])
+    hr <- exp(coef_j)
+    
+    # Format HR and CI
+    formatted.hr <- sprintf("%.2f", hr)
+    formatted.ci.lower <- sprintf("%.2f", ci_lower)
+    formatted.ci.upper <- sprintf("%.2f", ci_upper)
+    hr_ci <- paste0(formatted.hr, " (", formatted.ci.lower, "-", formatted.ci.upper, ")")
+    
+    # Subset data for current quartile level
+    quartile_data <- dietaryscorewithquartile %>%
+      filter(as.integer(dietaryscorewithquartile[, i]) == j)
+    
+    # Case count and person-years
+    n <- sum(!is.na(quartile_data[, i]))
+    person.years <- sum(quartile_data$survival.time, na.rm = TRUE)
+    cases <- sum(quartile_data$group == "psoriasis")
+    incidence <- cases / n * 100
+    cases.total <- paste0(cases, "/", n, " (", sprintf("%.3f", incidence), ")")
+    
+    # Store the result row
+    result_row <- data.frame(
+      Nutrient = nutrient,
+      Quartile = paste0("Q", j),
+      case = cases,
+      total = n,
+      incidence = incidence,
+      Case.total = cases.total,
+      person.years = person.years,
+      HR.95.CI = hr_ci,
+      P.value = signif(p_j, 3)
+    )
+    
+    # Append to results
+    dietary.score.results <- rbind(dietary.score.results, result_row)
+  }
+}
+
+# Print results
+print(dietary.score.results)
+
+# Save the results to a CSV file
+write.csv(dietary.score.results, "diet quality output/flavonoid quartile model 2.2.csv", row.names = FALSE)
+```
+
+## add for trend
+```{r}
+# Initialize an empty data frame to store the results
+dietary.score.results <- data.frame()
+
+# Define the survival object
+dietaryscorewithquartile$Survival.Obj <- with(dietaryscorewithquartile, Surv(survival.time, event))
+
+# Loop through columns 3 to 89 (assumed dietary scores)
+for (i in c(72:79)) {
+  
+  # Run univariate Cox model
+  model.uni <- coxph(Survival.Obj ~ as.numeric(dietaryscorewithquartile[, i]) + Sex + Age.group + multimorbidity + IMD.quartile + Qualification, data = dietaryscorewithquartile)
+  
+  # Extract variable name
+  x <- names(dietaryscorewithquartile)[i]
+  y <- "Survival.Obj"
+  
+  # Extract model statistics
+  coefficients <- coef(model.uni)[1]
+  se <- summary(model.uni)$coefficients[1, "se(coef)"]
+  z.value <- summary(model.uni)$coefficients[1, "z"]
+  p.value <- summary(model.uni)$coefficients[1, "Pr(>|z|)"]
+  ci.lower <- exp(confint(model.uni)[1, 1])
+  ci.upper <- exp(confint(model.uni)[1, 2])
+  hr <- exp(coefficients)
+  
+  # Format HR and CI
+  formatted.hr <- sprintf("%.3f", hr)
+  formatted.ci.lower <- sprintf("%.3f", ci.lower)
+  formatted.ci.upper <- sprintf("%.3f", ci.upper)
+  CI <- paste0(formatted.hr, " (", formatted.ci.lower, "-", formatted.ci.upper, ")")
+  
+  # Number of non-missing observations
+  n <- sum(!is.na(dietaryscorewithquartile[, i]))
+  
+  # Calculate person-years
+  person.years <- sum(dietaryscorewithquartile$survival.time[!is.na(dietaryscorewithquartile[, i])], na.rm = TRUE)
+  
+  # Calculate number of cases and incidence
+  cases <- sum(dietaryscorewithquartile$group == "psoriasis" & !is.na(dietaryscorewithquartile[, i]))
+  incidence <- cases / n * 100
+  cases.total <- paste0(cases, "/", n, " (", sprintf("%.3f", incidence), ")")
+
+  # Store the results
+  results <- data.frame(
+    Nutrient = x,
+    Case.Total = cases.total,
+    case = cases,
+    total = n,
+    incidence = incidence,
+    Person.Years = round(person.years, 1),
+    HR.95.CI = CI,
+    P.value = signif(p.value, 3)
+  )
+  
+  # Append to the main results data frame
+  dietary.score.results <- rbind(dietary.score.results, results)
+}
+
+# Print the results
+print(dietary.score.results)
+
+# Save the results to a CSV file
+write.csv(dietary.score.results, "diet quality output/flavonoid trend model 2.2.csv", row.names = FALSE)
+```
+
+
+# model 2
+```{r}
+# Initialize an empty data frame to store the results
+dietary.score.results <- data.frame()
+
+# Define the survival object
+polyphenolwithhealth$Survival.Obj <- with(polyphenolwithhealth, Surv(survival.time, event))
+
+# Loop through columns 3 to 89 (assumed dietary scores)
+for (i in 3:8) {
+  
+  # Run univariate Cox model
+  model.uni <- coxph(Survival.Obj ~ polyphenolwithhealth[,i] + Sex + Age.group + Ethnic.background + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + IMD.quartile + Qualification, data = polyphenolwithhealth)
+  
+  # Extract variable name
+  x <- names(polyphenolwithhealth)[i]
+  y <- "Survival.Obj"
+  
+  # Extract model statistics
+  coefficients <- coef(model.uni)[1]
+  se <- summary(model.uni)$coefficients[1, "se(coef)"]
+  z.value <- summary(model.uni)$coefficients[1, "z"]
+  p.value <- summary(model.uni)$coefficients[1, "Pr(>|z|)"]
+  ci.lower <- exp(confint(model.uni)[1, 1])
+  ci.upper <- exp(confint(model.uni)[1, 2])
+  hr <- exp(coefficients)
+  
+  # Format HR and CI
+  formatted.hr <- sprintf("%.3f", hr)
+  formatted.ci.lower <- sprintf("%.3f", ci.lower)
+  formatted.ci.upper <- sprintf("%.3f", ci.upper)
+  CI <- paste0(formatted.hr, " (", formatted.ci.lower, "-", formatted.ci.upper, ")")
+  
+  # Number of non-missing observations
+  n <- sum(!is.na(polyphenolwithhealth[, i]))
+  
+  # Calculate person-years
+  person.years <- sum(polyphenolwithhealth$survival.time[!is.na(polyphenolwithhealth[, i])], na.rm = TRUE)
+  
+  # Calculate number of cases and incidence
+  cases <- sum(polyphenolwithhealth$group == "psoriasis" & !is.na(polyphenolwithhealth[, i]))
+  incidence <- cases / n * 100
+  cases.total <- paste0(cases, "/", n, " (", sprintf("%.3f", incidence), ")")
+
+  # Store the results
+  results <- data.frame(
+    Nutrient = x,
+    case = cases,
+    total = n,
+    incidence = incidence,
+    Case.Total = cases.total,
+    Person.Years = round(person.years, 1),
+    HR.95.CI = CI,
+    P.value = signif(p.value, 3)
+  )
+  
+  # Append to the main results data frame
+  dietary.score.results <- rbind(dietary.score.results, results)
+}
+
+# Print the results
+print(dietary.score.results)
+
+# Save the results to a CSV file
+write.csv(dietary.score.results, "diet quality output/flavonoid dose model 3.2.csv")
+```
+
+## add for quartiles
+```{r}
+dietaryscorewithquartile <- polyphenolwithhealth %>%
+  mutate(across(3:8, ~ cut(., breaks = quantile(., probs = 0:4 / 4, na.rm = TRUE), 
+                             include.lowest = TRUE, labels = FALSE), 
+                .names = "quartile_{col}"))
+
+dietaryscorewithquartile <- dietaryscorewithquartile[, c(1:2, 72:77, 9:71)]
+
+
+# Initialize an empty data frame to store the results
+dietary.score.results <- data.frame()
+
+# Define the survival object
+dietaryscorewithquartile$Survival.Obj <- with(dietaryscorewithquartile, Surv(survival.time, event))
+
+# Loop through dietary score columns (quartile variables)
+for (i in c(72:79)) {
+  
+  # Run Cox model with quartiles treated as factors (Q1 as reference)
+  model.uni <- coxph(Survival.Obj ~ factor(dietaryscorewithquartile[, i]) + Sex + Age.group + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + IMD.quartile + Qualification, data = dietaryscorewithquartile)
+  
+  # Extract variable name
+  nutrient <- names(dietaryscorewithquartile)[i]
+  response <- "Survival.Obj"
+  
+  # Loop through Q2–Q4 (compared to Q1)
+  for (j in 2:4) {
+    
+    # Extract statistics
+    coef_j <- coef(model.uni)[j - 1]
+    se_j <- summary(model.uni)$coefficients[j - 1, "se(coef)"]
+    z_j <- summary(model.uni)$coefficients[j - 1, "z"]
+    p_j <- summary(model.uni)$coefficients[j - 1, "Pr(>|z|)"]
+    ci_lower <- exp(confint(model.uni)[j - 1, 1])
+    ci_upper <- exp(confint(model.uni)[j - 1, 2])
+    hr <- exp(coef_j)
+    
+    # Format HR and CI
+    formatted.hr <- sprintf("%.2f", hr)
+    formatted.ci.lower <- sprintf("%.2f", ci_lower)
+    formatted.ci.upper <- sprintf("%.2f", ci_upper)
+    hr_ci <- paste0(formatted.hr, " (", formatted.ci.lower, "-", formatted.ci.upper, ")")
+    
+    # Subset data for current quartile level
+    quartile_data <- dietaryscorewithquartile %>%
+      filter(as.integer(dietaryscorewithquartile[, i]) == j)
+    
+    # Case count and person-years
+    n <- sum(!is.na(quartile_data[, i]))
+    person.years <- sum(quartile_data$survival.time, na.rm = TRUE)
+    cases <- sum(quartile_data$group == "psoriasis")
+    incidence <- cases / n * 100
+    cases.total <- paste0(cases, "/", n, " (", sprintf("%.2f", incidence), ")")
+    
+    # Store the result row
+    result_row <- data.frame(
+      Nutrient = nutrient,
+      Quartile = paste0("Q", j),
+      case = cases,
+      total = n,
+      incidence = incidence,
+      Case.total = cases.total,
+      person.years = person.years,
+      HR.95.CI = hr_ci,
+      P.value = signif(p_j, 3)
+    )
+    
+    # Append to results
+    dietary.score.results <- rbind(dietary.score.results, result_row)
+  }
+}
+
+# Print results
+print(dietary.score.results)
+
+# Save the results to a CSV file
+write.csv(dietary.score.results, "diet quality output/flavonoid quartile model 3.2.csv", row.names = FALSE)
+```
+
+## add for trend
+```{r}
+# Initialize an empty data frame to store the results
+dietary.score.results <- data.frame()
+
+# Define the survival object
+dietaryscorewithquartile$Survival.Obj <- with(dietaryscorewithquartile, Surv(survival.time, event))
+
+# Loop through columns 3 to 89 (assumed dietary scores)
+for (i in c(72:79)) {
+  
+  # Run univariate Cox model
+  model.uni <- coxph(Survival.Obj ~ as.numeric(dietaryscorewithquartile[, i]) + Sex + Age.group + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + IMD.quartile + Qualification, data = dietaryscorewithquartile)
+  
+  # Extract variable name
+  x <- names(dietaryscorewithquartile)[i]
+  y <- "Survival.Obj"
+  
+  # Extract model statistics
+  coefficients <- coef(model.uni)[1]
+  se <- summary(model.uni)$coefficients[1, "se(coef)"]
+  z.value <- summary(model.uni)$coefficients[1, "z"]
+  p.value <- summary(model.uni)$coefficients[1, "Pr(>|z|)"]
+  ci.lower <- exp(confint(model.uni)[1, 1])
+  ci.upper <- exp(confint(model.uni)[1, 2])
+  hr <- exp(coefficients)
+  
+  # Format HR and CI
+  formatted.hr <- sprintf("%.3f", hr)
+  formatted.ci.lower <- sprintf("%.3f", ci.lower)
+  formatted.ci.upper <- sprintf("%.3f", ci.upper)
+  CI <- paste0(formatted.hr, " (", formatted.ci.lower, "-", formatted.ci.upper, ")")
+  
+  # Number of non-missing observations
+  n <- sum(!is.na(dietaryscorewithquartile[, i]))
+  
+  # Calculate person-years
+  person.years <- sum(dietaryscorewithquartile$survival.time[!is.na(dietaryscorewithquartile[, i])], na.rm = TRUE)
+  
+  # Calculate number of cases and incidence
+  cases <- sum(dietaryscorewithquartile$group == "psoriasis" & !is.na(dietaryscorewithquartile[, i]))
+  incidence <- cases / n * 100
+  cases.total <- paste0(cases, "/", n, " (", sprintf("%.3f", incidence), ")")
+
+  # Store the results
+  results <- data.frame(
+    Nutrient = x,
+    Case.Total = cases.total,
+    case = cases,
+    total = n,
+    incidence = incidence,
+    Person.Years = round(person.years, 1),
+    HR.95.CI = CI,
+    P.value = signif(p.value, 3)
+  )
+  
+  # Append to the main results data frame
+  dietary.score.results <- rbind(dietary.score.results, results)
+}
+
+# Print the results
+print(dietary.score.results)
+
+# Save the results to a CSV file
+write.csv(dietary.score.results, "diet quality output/flavonoid trend model 3.2.csv", row.names = FALSE)
+```
+
+# model 3
+```{r}
+# Initialize an empty data frame to store the results
+dietary.score.results <- data.frame()
+
+# Define the survival object
+polyphenolwithhealth$Survival.Obj <- with(polyphenolwithhealth, Surv(survival.time, event))
+
+# Loop through columns 3 to 89 (assumed dietary scores)
+for (i in c(3:8)) {
+
+  # Run sunivariate Cox model
+  model.uni <- coxph(Survival.Obj ~ polyphenolwithhealth[,i] + Sex + Age.group + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + IMD.quartile + Qualification + Energy + Free.sugar + meat + wholegrain + BMI.Category, data = polyphenolwithhealth)
+  
+  # Extract variable name
+  x <- names(polyphenolwithhealth)[i]
+  y <- "Survival.Obj"
+  
+  # Extract model statistics
+  coefficients <- coef(model.uni)[1]
+  se <- summary(model.uni)$coefficients[1, "se(coef)"]
+  z.value <- summary(model.uni)$coefficients[1, "z"]
+  p.value <- summary(model.uni)$coefficients[1, "Pr(>|z|)"]
+  ci.lower <- exp(confint(model.uni)[1, 1])
+  ci.upper <- exp(confint(model.uni)[1, 2])
+  hr <- exp(coefficients)
+  
+  # Format HR and CI
+  formatted.hr <- sprintf("%.3f", hr)
+  formatted.ci.lower <- sprintf("%.3f", ci.lower)
+  formatted.ci.upper <- sprintf("%.3f", ci.upper)
+  CI <- paste0(formatted.hr, " (", formatted.ci.lower, "-", formatted.ci.upper, ")")
+  
+  # Number of non-missing observations
+  n <- sum(!is.na(polyphenolwithhealth[, i]))
+  
+  # Calculate person-years
+  person.years <- sum(polyphenolwithhealth$survival.time[!is.na(polyphenolwithhealth[, i])], na.rm = TRUE)
+  
+  # Calculate number of cases and incidence
+  cases <- sum(polyphenolwithhealth$group == "psoriasis" & !is.na(polyphenolwithhealth[, i]))
+  incidence <- cases / n * 100
+  cases.total <- paste0(cases, "/", n, " (", sprintf("%.3f", incidence), ")")
+
+  # Store the results
+  results <- data.frame(
+    Nutrient = x,
+    case = cases,
+    total = n,
+    incidence = incidence,
+    Case.Total = cases.total,
+    Person.Years = round(person.years, 1),
+    HR.95.CI = CI,
+    P.value = signif(p.value, 3)
+  )
+  
+  # Append to the main results data frame
+  dietary.score.results <- rbind(dietary.score.results, results)
+}
+
+# Print the results
+print(dietary.score.results)
+
+# Save the results to a CSV file
+write.csv(dietary.score.results, "diet quality output/flavonoid dose model PRS.csv")
+```
+vars <- names(polyphenolwithhealth)[3:12]
+
+quartile_summary <- list()
+
+for (v in vars) {
+  q <- quantile(polyphenolwithhealth[[v]], probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)
+  m <- mean(polyphenolwithhealth[[v]], na.rm = TRUE)
+  s <- sd(polyphenolwithhealth[[v]], na.rm = TRUE)
+  
+  quartile_summary[[v]] <- data.frame(
+    Variable = v,
+    Q1_range = paste0(round(q[1], 2), " - ", round(q[2], 2)),
+    Q2_range = paste0(round(q[2], 2), " - ", round(q[3], 2)),
+    Q3_range = paste0(round(q[3], 2), " - ", round(q[4], 2)),
+    Q4_range = paste0(round(q[4], 2), " - ", round(q[5], 2)),
+    Median = round(q[3], 2),
+    Mean = round(m, 2),
+    SD = round(s, 2)
+  )
+}
+
+quartile_table <- do.call(rbind, quartile_summary)
+rownames(quartile_table) <- NULL
+
+print(quartile_table)
+## add for quartiles
+```{r}
+
+
+dietaryscorewithquartile <- polyphenolwithhealth %>%
+  mutate(across(3:8, ~ cut(., breaks = quantile(., probs = 0:4 / 4, na.rm = TRUE), 
+                             include.lowest = TRUE, labels = FALSE), 
+                .names = "quartile_{col}"))
+
+dietaryscorewithquartile <- dietaryscorewithquartile[, c(1:2, 72:77, 9:71)]
+
+# Initialize an empty data frame to store the results
+dietary.score.results <- data.frame()
+
+# Define the survival object
+dietaryscorewithquartile$Survival.Obj <- with(dietaryscorewithquartile, Surv(survival.time, event))
+
+# Loop through dietary score columns (quartile variables)
+for (i in c(72:79)) {
+  
+  # Run Cox model with quartiles treated as factors (Q1 as reference)
+  model.uni <- coxph(Survival.Obj ~ factor(dietaryscorewithquartile[, i]) + Sex + Age.group + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + IMD.quartile + Qualification + Energy + Free.sugar + meat + wholegrain +BMI.Category, data = dietaryscorewithquartile)
+  
+  # Extract variable name
+  nutrient <- names(dietaryscorewithquartile)[i]
+  response <- "Survival.Obj"
+  
+  # Loop through Q2–Q4 (compared to Q1)
+  for (j in 2:4) {
+    
+    # Extract statistics
+    coef_j <- coef(model.uni)[j - 1]
+    se_j <- summary(model.uni)$coefficients[j - 1, "se(coef)"]
+    z_j <- summary(model.uni)$coefficients[j - 1, "z"]
+    p_j <- summary(model.uni)$coefficients[j - 1, "Pr(>|z|)"]
+    ci_lower <- exp(confint(model.uni)[j - 1, 1])
+    ci_upper <- exp(confint(model.uni)[j - 1, 2])
+    hr <- exp(coef_j)
+    
+    # Format HR and CI
+    formatted.hr <- sprintf("%.2f", hr)
+    formatted.ci.lower <- sprintf("%.2f", ci_lower)
+    formatted.ci.upper <- sprintf("%.2f", ci_upper)
+    hr_ci <- paste0(formatted.hr, " (", formatted.ci.lower, "-", formatted.ci.upper, ")")
+    
+    # Subset data for current quartile level
+    quartile_data <- dietaryscorewithquartile %>%
+      filter(as.integer(dietaryscorewithquartile[, i]) == j)
+    
+    # Case count and person-years
+    n <- sum(!is.na(quartile_data[, i]))
+    person.years <- sum(quartile_data$survival.time, na.rm = TRUE)
+    cases <- sum(quartile_data$group == "psoriasis")
+    incidence <- cases / n * 100
+    cases.total <- paste0(cases, "/", n, " (", sprintf("%.2f", incidence), ")")
+    
+    # Store the result row
+    result_row <- data.frame(
+      Nutrient = nutrient,
+      Quartile = paste0("Q", j),
+      case = cases,
+      total = n,
+      incidence = incidence,
+      Case.total = cases.total,
+      person.years = person.years,
+      HR.95.CI = hr_ci,
+      P.value = signif(p_j, 3)
+    )
+    
+    # Append to results
+    dietary.score.results <- rbind(dietary.score.results, result_row)
+  }
+}
+
+# Print results
+print(dietary.score.results)
+
+# Save the results to a CSV file
+write.csv(dietary.score.results, "diet quality output/flavonoid quartile model PRS.csv", row.names = FALSE)
+```
+
+
+## add for trend
+```{r}
+# Initialize an empty data frame to store the results
+dietary.score.results <- data.frame()
+
+# Define the survival object
+dietaryscorewithquartile$Survival.Obj <- with(dietaryscorewithquartile, Surv(survival.time, event))
+
+# Loop through columns 3 to 89 (assumed dietary scores)
+for (i in c(72:79)) {
+  
+  # Run univariate Cox model
+  model.uni <- coxph(Survival.Obj ~ as.numeric(dietaryscorewithquartile[, i]) + Sex + Age.group + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + IMD.quartile + Qualification + Energy + Free.sugar + meat + wholegrain + BMI.Category, data = dietaryscorewithquartile)
+  
+  # Extract variable name
+  x <- names(dietaryscorewithquartile)[i]
+  y <- "Survival.Obj"
+  
+  # Extract model statistics
+  coefficients <- coef(model.uni)[1]
+  se <- summary(model.uni)$coefficients[1, "se(coef)"]
+  z.value <- summary(model.uni)$coefficients[1, "z"]
+  p.value <- summary(model.uni)$coefficients[1, "Pr(>|z|)"]
+  ci.lower <- exp(confint(model.uni)[1, 1])
+  ci.upper <- exp(confint(model.uni)[1, 2])
+  hr <- exp(coefficients)
+  
+  # Format HR and CI
+  formatted.hr <- sprintf("%.3f", hr)
+  formatted.ci.lower <- sprintf("%.3f", ci.lower)
+  formatted.ci.upper <- sprintf("%.3f", ci.upper)
+  CI <- paste0(formatted.hr, " (", formatted.ci.lower, "-", formatted.ci.upper, ")")
+  
+  # Number of non-missing observations
+  n <- sum(!is.na(dietaryscorewithquartile[, i]))
+  
+  # Calculate person-years
+  person.years <- sum(dietaryscorewithquartile$survival.time[!is.na(dietaryscorewithquartile[, i])], na.rm = TRUE)
+  
+  # Calculate number of cases and incidence
+  cases <- sum(dietaryscorewithquartile$group == "psoriasis" & !is.na(dietaryscorewithquartile[, i]))
+  incidence <- cases / n * 100
+  cases.total <- paste0(cases, "/", n, " (", sprintf("%.3f", incidence), ")")
+
+  # Store the results
+  results <- data.frame(
+    Nutrient = x,
+    Case.Total = cases.total,
+    case = cases,
+    total = n,
+    incidence = incidence,
+    Person.Years = round(person.years, 1),
+    HR.95.CI = CI,
+    P.value = signif(p.value, 3)
+  )
+  
+  # Append to the main results data frame
+  dietary.score.results <- rbind(dietary.score.results, results)
+}
+
+# Print the results
+print(dietary.score.results)
+
+# Save the results to a CSV file
+write.csv(dietary.score.results, "diet quality output/flavonoid trend model PRS.csv", row.names = FALSE)
+```
+# Table 1
+```{r}
+############## Show in table format ###################
+
+# 定义需要用 Median (IQR) 显示的变量
+nonnormal_vars <- c(
+  "Free.sugar", "meat", "wholegrain",
+  "anthocyanins", "flavanones", "flavonols",
+  "flavones", "flavan.3.ols", "total.flavonoid"
+)
+
+# 创建 TableOne 对象
+description.DQI <- CreateTableOne(
+  data = polyphenolwithhealth,
+  vars = c(
+    "Ethnic.background", "Sex", "Age.at.recruitment",
+    "Summed.MET.minutes.per.week.for.all.activity...Instance.0",
+    "Smoking.status...Instance.0", "alcohol.category",
+    "multimorbidity", "BMI", "PRS.tertile",
+    "Free.sugar", "meat", "wholegrain",
+    "anthocyanins", "flavanones", "flavonols",
+    "flavones", "flavan.3.ols", "total.flavonoid",
+    "Townsend.deprivation.index.at.recruitment",
+    "Qualification", "Energy"
+  ),
+  
+  factorVars = c(
+    "Ethnic.background", "Sex", "Smoking.status...Instance.0",
+    "Alcohol.drinker.status...Instance.0", "multimorbidity",
+    "Qualification", "PRS.tertile"
+  ),
+  
+  strata = "group"
+)
+
+# 打印 Table 1（Median (IQR) + 自动显示 P 值）
+table1_output <- print(
+  description.DQI,
+  quote = FALSE,
+  noSpaces = TRUE,
+  nonnormal = nonnormal_vars,  # Median IQR
+  test = TRUE                  # 自动给 P 值（Kruskal-Wallis）
+)
+
+# 显示结果
+table1_output
+
+# 导出 CSV
+write.csv(table1_output, "Table1.csv")
+```
+
+# Interaction
+
+```{r}
+dietaryscorewithquartilek <- dietaryscorewithquartile %>% filter(PRS.tertile != "Missing" )
+dietaryscorewithquartilek$PRS.tertile <- factor(droplevels(dietaryscorewithquartilek$PRS.tertile),
+  levels = c("Low", "Medium", "High")
+)
+
+model.1 <- coxph(Survival.Obj ~ factor(flavones_ord4)* PRS.tertile + Sex + Age.group + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + IMD.quartile + Qualification + Energy + Free.sugar + meat + wholegrain + BMI.Category + Genotype.measurement.batch + Genetic.principal.components...Array.1 + Genetic.principal.components...Array.2 + Genetic.principal.components...Array.3 + Genetic.principal.components...Array.4 + Genetic.principal.components...Array.5 + Genetic.principal.components...Array.6 + Genetic.principal.components...Array.7 + Genetic.principal.components...Array.8 + Genetic.principal.components...Array.9 + Genetic.principal.components...Array.10, data = dietaryscorewithquartile)
+
+model.2 <- coxph(Survival.Obj ~ factor(flavones_ord4) + PRS.tertile + Sex + Age.group + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + IMD.quartile + Qualification + Energy + Free.sugar + meat + wholegrain + BMI.Category + Genotype.measurement.batch + Genetic.principal.components...Array.1 + Genetic.principal.components...Array.2 + Genetic.principal.components...Array.3 + Genetic.principal.components...Array.4 + Genetic.principal.components...Array.5 + Genetic.principal.components...Array.6 + Genetic.principal.components...Array.7 + Genetic.principal.components...Array.8 + Genetic.principal.components...Array.9 + Genetic.principal.components...Array.10, data = dietaryscorewithquartile)
+
+anova(model.2, model.1, test = "LRT")
+
+
+# Print final table
+print(interaction_results)
+
+#0.5188
+```
+
+
+```{r}
+# 创建生存对象
+polyphenolwithhealth$Survival.Obj <- with(polyphenolwithhealth, Surv(survival.time, event))
+
+# 拟合模型
+model <- coxph(Survival.Obj ~ total.flavonoid * PRS.tertile + Sex + Age.group + Ethnic.background + MET.Quintiles + Smoking.status...Instance.0 + alcohol.category + multimorbidity + IMD.quartile + Energy + Free.sugar + meat + Sodium + AQI.Category + BMI.Category +  Genotype.measurement.batch + Genetic.principal.components...Array.1 + Genetic.principal.components...Array.2 + Genetic.principal.components...Array.3 + Genetic.principal.components...Array.4 + Genetic.principal.components...Array.5 + Genetic.principal.components...Array.6 + Genetic.principal.components...Array.7 + Genetic.principal.components...Array.8 + Genetic.principal.components...Array.9 + Genetic.principal.components...Array.10,
+               data = polyphenolwithhealth)
+
+# 提取第 1、56、57 项的 HR、CI 和 p 值
+term_ids <- c(1, 158, 159)
+coef_values <- coef(model)[term_ids]
+ci_values <- confint(model)[term_ids, ]
+hr_values <- exp(coef_values)
+ci_exp <- exp(ci_values)
+p_values <- summary(model)$coefficients[term_ids, "Pr(>|z|)"]
+
+# 格式化输出
+results <- data.frame(
+  Term = c("total.flavonoid (Low PRS)", 
+           "total.flavonoid:PRS.tertileMedium", 
+           "total.flavonoid:PRS.tertileHigh"),
+  HR = sprintf("%.3f", hr_values),
+  CI = paste0("(", sprintf("%.3f", ci_exp[, 1]), "-", sprintf("%.3f", ci_exp[, 2]), ")"),
+  P.value = signif(p_values, 3)
+)
+
+# 合并 HR 和 CI 成一列
+results$HR.95.CI <- paste0(results$HR, " ", results$CI)
+results <- results[, c("Term", "HR.95.CI", "P.value")]
+
+# 输出
+print(results)
+
+# Save the results to a CSV file
+write.csv(results, "coxph_interaction_with_incidence total.flavonoid.csv")
+```
