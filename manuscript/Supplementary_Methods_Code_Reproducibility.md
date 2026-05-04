@@ -1,9 +1,0 @@
-# Supplementary Methods: computational reproducibility
-
-All analyses were conducted using R. The analysis workflow was organised as a reproducible pipeline using the `targets` package. The pipeline includes data preparation, construction of flavonoid intake variables, derivation of survival time and covariates, Cox proportional hazards models, restricted cubic spline analyses, food-source analyses, interaction analyses, and generation of tables and figures.
-
-Dietary flavonoid intake was estimated by linking UK Biobank 24-hour dietary recall food items with a flavonoid composition database derived from Phenol-Explorer and USDA resources. Food-specific portion sizes and intake frequencies were used to derive daily intake estimates. Total flavonoid intake and flavonoid subclasses, including anthocyanins, flavanones, flavan-3-ols, flavonols, flavones, polymers, and proanthocyanidins, were then calculated for each participant.
-
-Incident psoriasis was analysed using Cox proportional hazards regression with follow-up time calculated from baseline assessment to first recorded psoriasis diagnosis or censoring. Sequential models adjusted for demographic, lifestyle, socioeconomic, genetic, and health-related covariates as described in the manuscript. Dose-response associations were examined using restricted cubic splines. Quartile-based analyses and trend tests were conducted by modelling ordered intake categories.
-
-The repository includes a `renv` environment file and a `targets` pipeline to improve reproducibility. Raw UK Biobank data are not included because access is restricted. Approved researchers can reproduce the analyses by obtaining UK Biobank access, preparing the required input files with the documented variable names, placing them in `data/raw/`, and running `targets::tar_make()`.
